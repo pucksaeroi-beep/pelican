@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release/
+.DS_Store
+*.log
+# never commit real data, dumps or local databases
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+dumps/

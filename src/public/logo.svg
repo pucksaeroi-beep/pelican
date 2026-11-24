@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d3b66"/><stop offset="1" stop-color="#0f8b8d"/>
+    </linearGradient>
+    <linearGradient id="pouch" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb347"/><stop offset="1" stop-color="#ff7a2f"/>
+    </linearGradient>
+    <linearGradient id="bird" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e6f1f5"/>
+    </linearGradient>
+    <clipPath id="clip"><rect x="100" y="100" width="824" height="824" rx="190"/></clipPath>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#04192c" flood-opacity=".35"/></filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="190" fill="url(#bg)"/>
+  <g clip-path="url(#clip)"><g filter="url(#sh)">
+    <!-- neck and head -->
+    <path d="M296 960 C290 760 306 590 356 500 C392 436 380 372 400 318 C426 250 500 222 556 250 C596 270 610 312 604 352 L596 384 C540 404 500 444 474 512 C446 586 446 760 470 960 Z" fill="url(#bird)"/>
+    <!-- pouch: a database cylinder -->
+    <path d="M588 404 L842 452 L842 600 C842 640 760 668 700 668 C640 668 588 640 588 600 Z" fill="url(#pouch)"/>
+    <path d="M588 470 C588 506 640 532 700 532 C760 532 842 508 842 476" fill="none" stroke="#c4561c" stroke-width="12" stroke-linecap="round" opacity=".55"/>
+    <path d="M588 540 C588 576 640 602 700 602 C760 602 842 578 842 546" fill="none" stroke="#c4561c" stroke-width="12" stroke-linecap="round" opacity=".55"/>
+    <!-- upper beak -->
+    <path d="M560 318 C640 336 780 384 884 430 C900 438 896 456 878 456 C770 446 650 420 590 404 Z" fill="#ffc46b"/>
+  </g></g>
+  <circle cx="500" cy="300" r="20" fill="#0d3b66"/>
+  <circle cx="506" cy="294" r="6" fill="#ffffff"/>
+</svg>

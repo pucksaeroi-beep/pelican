@@ -1,0 +1,76 @@
+{
+  "name": "pelican",
+  "productName": "Pelican",
+  "version": "1.0.0",
+  "description": "A fast, modern database client for macOS \u2014 PostgreSQL, MySQL, SQLite, MongoDB and DB2, with dumps and a permissioned MCP server",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "test": "node --test test/*.test.cjs",
+    "dist": "vite build && electron-builder --mac --publish never",
+    "install-app": "npm run dist && node scripts/install-app.mjs",
+    "release": "npm run dist && node scripts/release.mjs"
+  },
+  "build": {
+    "appId": "local.pelican.app",
+    "productName": "Pelican",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**",
+      "dist/**",
+      "package.json",
+      "!node_modules/ibm_db/build.zip",
+      "!node_modules/ibm_db/test/**",
+      "!node_modules/ibm_db/src/**",
+      "!node_modules/ibm_db/installer/clidriver/samples/**",
+      "!node_modules/ibm_db/installer/clidriver/include/**"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dir"
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "icon": "build/icon.icns",
+      "hardenedRuntime": false,
+      "darkModeSupport": true
+    },
+    "asarUnpack": [
+      "node_modules/ibm_db/**",
+      "electron/drivers/sqlite-worker.cjs"
+    ],
+    "npmRebuild": false
+  },
+  "devDependencies": {
+    "@codemirror/autocomplete": "^6.20.4",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
+    "codemirror": "^6.0.2",
+    "electron": "^39.8.10",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.4.6"
+  },
+  "dependencies": {
+    "ibm_db": "^4.1.1",
+    "mongodb": "^7.9.1",
+    "mysql2": "^3.24.6",
+    "pg": "^8.23.1",
+    "pg-cursor": "^2.22.1"
+  }
+}
