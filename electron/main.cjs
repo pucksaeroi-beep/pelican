@@ -5,7 +5,8 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const { Store, ResultCache } = require('./store.cjs');
 const { TYPES, makeDriver, detectLocal, parseUrl } = require('./drivers/index.cjs');
-const { buildSelect, buildCount, buildDistinct, buildDistinctWrapped, wrapQuery } = require('./drivers/sqlbuild.cjs');
+const { buildSelect, buildCount, buildDistinct, buildDistinctWrapped, wrapQuery, buildEdits, editsText } = require('./drivers/sqlbuild.cjs');
+const { runTransfer } = require('./transfer.cjs');
 const { statementKind, codeWords } = require('./lib/sqltext.cjs');
 const { runDump, toolsStatus } = require('./dump.cjs');
 const { McpServer } = require('./mcp.cjs');
@@ -269,6 +270,27 @@ function registerIpc() {
     logHistory({ connId: o.connId, sql: (o.analyze ? 'EXPLAIN ANALYZE ' : 'EXPLAIN ') + o.sql, type: 'user', result: 'ok', ms: Math.round(performance.now() - t0) });
     return r;
   });
+  handle('data:previewEdits', async (o) => {
+    const d = (await open(o.connId)).driver;
+    return d.dialect === 'mongo' ? d.editsText(o.table, o.changes) : editsText({ dialect: d.dialect, schema: o.schema, table: o.table, changes: o.changes });
+  });
+  handle('data:applyEdits', async (o) => {
+    const l = await open(o.connId);
+    const d = l.driver;
+    if (l.cfg.readOnly) throw new Error('This connection is read-only.');
+    const t0 = performance.now();
+    const text = d.dialect === 'mongo' ? d.editsText(o.table, o.changes) : editsText({ dialect: d.dialect, schema: o.schema, table: o.table, changes: o.changes });
+    try {
+      if (d.dialect === 'mongo') await d.applyEdits(o.schema, o.table, o.changes);
+      else await d.tx(o.db, buildEdits({ dialect: d.dialect, schema: o.schema, table: o.table, changes: o.changes }));
+    } catch (e) {
+      logHistory({ connId: o.connId, sql: text, type: 'user', result: e.message, ms: Math.round(performance.now() - t0), db: o.db, schema: o.schema });
+      throw e;
+    } finally { cache.invalidate(o.connId); }
+    logHistory({ connId: o.connId, sql: text, type: 'user', result: 'ok', rows: o.changes.length, ms: Math.round(performance.now() - t0), db: o.db, schema: o.schema });
+    for (const k of [...meta.keys()]) if (k.startsWith(o.connId + '\u0000objects')) meta.delete(k); // row counts
+    return { saved: o.changes.length };
+  });
   handle('data:cancel', async (connId, runId) => { const l = live.get(connId); if (l) await l.driver.cancel?.(runId); });
   handle('data:endSession', (connId, session) => { live.get(connId)?.driver.endSession?.(session); });
   handle('cache:clear', (connId) => { cache.invalidate(connId); return cache.stats(); });
@@ -299,6 +321,22 @@ function registerIpc() {
     } finally { dumpAbort = null; }
   });
   handle('dump:cancel', () => dumpAbort?.abort());
+
+  let transferAbort = null;
+  handle('transfer:run', async (o) => {
+    if (transferAbort) throw new Error('A transfer is already running.');
+    const [s, t] = [await open(o.from), await open(o.to)];
+    if (t.cfg.readOnly) throw new Error(`“${t.cfg.name}” is opened read-only.`);
+    transferAbort = new AbortController();
+    try {
+      return await runTransfer({ src: { id: o.from, ...s }, dst: { id: o.to, ...t }, o, progress: (e) => notify('transfer:progress', e), signal: transferAbort.signal });
+    } finally {
+      transferAbort = null;
+      cache.invalidate(o.to);
+      for (const k of [...meta.keys()]) if (k.startsWith(o.to + '\u0000')) meta.delete(k);
+    }
+  });
+  handle('transfer:cancel', () => transferAbort?.abort());
 
   handle('mcp:state', () => mcpState());
   handle('mcp:set', async (patch) => {
@@ -383,7 +421,9 @@ function buildMenu() {
       { label: 'New SQL Editor', accelerator: 'Cmd+T', click: () => send('new-editor') },
       { type: 'separator' },
       { label: 'Dump…', accelerator: 'Cmd+Shift+D', click: () => send('dump') },
+      { label: 'Transfer to Another Database…', accelerator: 'Cmd+Shift+T', click: () => send('transfer') },
       { type: 'separator' },
+      { label: 'Save Changes', accelerator: 'Cmd+S', click: () => send('save') },
       { label: 'Close Tab', accelerator: 'Cmd+W', click: () => send('close-tab') }] },
     { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }, { type: 'separator' }, { label: 'Find…', accelerator: 'Cmd+F', click: () => send('find') }] },
     { label: 'Query', submenu: [

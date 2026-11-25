@@ -51,4 +51,7 @@ function treeFromIndented(lines, parseLine) {
   return root.children.length === 1 ? root.children[0] : root;
 }
 
-module.exports = { cell, Queue, treeFromIndented, MAX_CELL };
+/** Error for a statement in a transaction that touched the wrong number of rows. */
+function txMismatch(st, n) { return `${st.what || 'A statement'} matched ${n} rows instead of ${st.expect}, so nothing was saved. The row may have been changed or deleted by someone else — refresh and try again.`; }
+
+module.exports = { cell, Queue, treeFromIndented, txMismatch, MAX_CELL };

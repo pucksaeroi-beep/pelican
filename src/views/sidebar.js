@@ -50,6 +50,17 @@ export class Sidebar {
     this.cache.set(key, p);
     return p;
   }
+  /** Close the connection and fold its node, so the tree does not open it again straight away. */
+  async disconnect(c) {
+    open.delete(c.id);
+    saveOpen();
+    this.forget(c.id);
+    app.state.errors.delete(c.id);
+    try { await api.conn.disconnect(c.id); } catch (e) { toast(e.message, 'error'); }
+    app.state.live.delete(c.id);
+    app.emit('conn-state', c.id);
+    toast(`Disconnected from ${c.name}`, 'info', 1600);
+  }
   forget(prefix) { for (const k of [...this.cache.keys()]) if (k.startsWith(prefix)) this.cache.delete(k); }
   refresh(prefix) { this.forget(prefix); this.render(); }
 
@@ -85,7 +96,7 @@ export class Sidebar {
 
   status(msgOrErr, depth, retry) {
     const err = msgOrErr instanceof Error;
-    return h('div', { class: 'tn tn-msg' + (err ? ' err' : ''), style: { '--d': depth } }, h('span', { class: 'tn-tw' }), err ? icon('warning') : h('span', { class: 'spin' }), h('span', { class: 'tn-label' }, err ? msgOrErr.message : msgOrErr),
+    return h('div', { class: 'tn tn-msg' + (err ? ' err' : ''), style: { '--d': depth } }, h('span', { class: 'tn-tw' }), err ? icon('warning') : h('span', { class: 'spin' }), h('span', { class: 'tn-label', title: err ? msgOrErr.message : null }, err ? msgOrErr.message.replace(/^(\[[^\]]*\])+\s*/, '') : msgOrErr),
       err && retry ? h('button', { class: 'link', onclick: retry }, 'Retry') : null);
   }
 
@@ -112,15 +123,17 @@ export class Sidebar {
       key, depth: 0, label: c.name, sub: where, cls: 'tn-conn', title: err || `${c.name}\n${where}${isLive ? '\n' + app.state.live.get(c.id) : ''}`,
       iconEl: h('span', { class: 'tn-ic' }, engineBadge(c.type), dot),
       extra: [pol && pol.access && pol.access !== 'off' && app.state.mcp.enabled ? h('span', { class: 'tn-ai ' + pol.access, title: `AI clients: ${pol.access === 'write' ? 'read & write' : 'read only'}${pol.scope === 'custom' ? ' (some tables)' : ''}` }, icon('sparkles')) : null,
-        c.color ? h('span', { class: 'tn-color', style: { background: c.color } }) : null],
+        c.color ? h('span', { class: 'tn-color', style: { background: c.color } }) : null,
+        isLive ? h('button', { class: 'tn-act', title: 'Disconnect', onclick: (e) => { e.stopPropagation(); this.disconnect(c); } }, icon('disconnect')) : null],
       expandable: true,
       onOpen: () => this.toggle(key),
       menu: () => [
-        isLive ? { label: 'Disconnect', icon: 'disconnect', onClick: async () => { await api.conn.disconnect(c.id); app.state.live.delete(c.id); this.forget(c.id); app.emit('conn-state', c.id); } } : { label: 'Connect', icon: 'plug', onClick: () => this.toggle(key, true) },
+        isLive ? { label: 'Disconnect', icon: 'disconnect', onClick: () => this.disconnect(c) } : { label: 'Connect', icon: 'plug', onClick: () => this.toggle(key, true) },
         { label: 'New SQL editor', icon: 'code', kbd: '⌘T', onClick: () => app.emit('open-editor', { connId: c.id }) },
         { label: 'Refresh', icon: 'refresh', onClick: () => { this.forget(c.id); api.cache.clear(c.id); app.emit('refresh-meta', c.id); this.render(); } },
         '-',
         { label: 'Dump…', icon: 'download', onClick: () => app.emit('dump', { connId: c.id }) },
+        { label: 'Transfer to another database…', icon: 'transfer', onClick: () => app.emit('transfer', { connId: c.id }) },
         { label: 'AI access…', icon: 'sparkles', onClick: () => app.emit('mcp', { connId: c.id }) },
         '-',
         { label: 'Edit connection…', icon: 'edit', onClick: () => app.emit('edit-connection', c) },
@@ -150,6 +163,7 @@ export class Sidebar {
       menu: () => [
         { label: 'New SQL editor', icon: 'code', onClick: () => app.emit('open-editor', { connId: c.id, db }) },
         { label: 'Dump database…', icon: 'download', onClick: () => app.emit('dump', { connId: c.id, db }) },
+        { label: 'Transfer database…', icon: 'transfer', onClick: () => app.emit('transfer', { connId: c.id, db }) },
         { label: 'Refresh', icon: 'refresh', onClick: () => this.refresh(key) }] }));
     if (open.has(key)) g.append(this.schemaList(c, db, 2));
     return g;
@@ -173,6 +187,7 @@ export class Sidebar {
       menu: () => [
         { label: 'New SQL editor here', icon: 'code', onClick: () => app.emit('open-editor', { connId: c.id, db, schema }) },
         { label: `Dump ${mongo || c.type === 'mysql' ? 'database' : 'schema'}…`, icon: 'download', onClick: () => app.emit('dump', { connId: c.id, db, schema }) },
+        { label: `Transfer ${mongo || c.type === 'mysql' ? 'database' : 'schema'}…`, icon: 'transfer', onClick: () => app.emit('transfer', { connId: c.id, db, schema }) },
         { label: 'Copy name', icon: 'copy', onClick: () => api.clipboard.write(schema) },
         { label: 'Refresh', icon: 'refresh', onClick: () => { this.refresh(key); app.emit('refresh-meta', c.id); } }] }));
     if (open.has(key) || this.filter) g.append(this.objectsOf(c, db, schema, depth + 1));
@@ -211,6 +226,7 @@ export class Sidebar {
         { label: 'Show DDL', icon: 'file', onClick: () => app.emit('open-table', { ...addr, tab: 'ddl' }) },
         '-',
         { label: 'Dump table…', icon: 'download', onClick: () => app.emit('dump', { connId: c.id, db, schema, tables: [o.name] }) },
+        o.kind !== 'view' ? { label: `Transfer ${c.type === 'mongo' ? 'collection' : 'table'}…`, icon: 'transfer', onClick: () => app.emit('transfer', { connId: c.id, db, schema, tables: [o.name] }) } : null,
         { label: 'Copy name', icon: 'copy', onClick: () => api.clipboard.write(o.name) },
         { label: 'Copy qualified name', onClick: () => api.clipboard.write(app.qualified(c, schema, o.name)) },
         scope && scope.access !== 'off' && scope.scope === 'custom' ? { label: 'Shared with AI clients?', icon: 'sparkles', onClick: () => app.emit('mcp', { connId: c.id }) } : null,

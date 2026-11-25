@@ -1,7 +1,7 @@
 'use strict';
 const mysql = require('mysql2/promise');
 const mysqlCb = require('mysql2');
-const { cell, treeFromIndented } = require('./base.cjs');
+const { cell, treeFromIndented, txMismatch } = require('./base.cjs');
 const { statementKind, quoteIdent, qualified } = require('../lib/sqltext.cjs');
 
 const SYSTEM = /^(mysql|sys|performance_schema|information_schema)$/i;
@@ -83,6 +83,20 @@ class MysqlDriver {
     return { c: s.conn, done: () => {} };
   }
   endSession(session) { const s = this.sessions.get(session); if (s) { s.conn.release(); this.sessions.delete(session); } }
+  async tx(db, stmts) {
+    const c = await this.pool.getConnection();
+    try {
+      await c.query('START TRANSACTION');
+      const out = [];
+      for (const st of stmts) {
+        const [r] = await c.query(st.sql, st.params || []);
+        out.push(r.affectedRows);
+        if (st.expect != null && r.affectedRows !== st.expect) throw new Error(txMismatch(st, r.affectedRows));
+      }
+      await c.query('COMMIT');
+      return out;
+    } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  }
 
   async query(db, sql, params = [], { maxRows = 1000, readOnly = false, session, runId, schema } = {}) {
     const { c, done } = await this.conn(readOnly ? null : session);
@@ -187,7 +201,7 @@ function streamRows(conn, sql, values, max) {
 // keep dump values close to the wire: Buffers for binary, strings for the rest
 function rawCast(field, next) {
   if (['BLOB', 'TINY_BLOB', 'MEDIUM_BLOB', 'LONG_BLOB', 'GEOMETRY', 'BIT'].includes(field.type) && field.charsetNr === 63) return field.buffer();
-  if (field.type === 'JSON') return field.string();
+  if (field.type === 'JSON') return field.string('utf8');
   return next();
 }
 const FRIENDLY = { LONG: 'int', LONGLONG: 'bigint', SHORT: 'smallint', TINY: 'tinyint', INT24: 'mediumint', NEWDECIMAL: 'decimal', DECIMAL: 'decimal', VAR_STRING: 'varchar', VARCHAR: 'varchar', STRING: 'char', DOUBLE: 'double', FLOAT: 'float', BLOB: 'text', TINY_BLOB: 'text', MEDIUM_BLOB: 'text', LONG_BLOB: 'text', DATETIME: 'datetime', TIMESTAMP: 'timestamp', DATE: 'date', TIME: 'time', YEAR: 'year', JSON: 'json', BIT: 'bit', ENUM: 'enum', SET: 'set', GEOMETRY: 'geometry', NULL: 'null' };

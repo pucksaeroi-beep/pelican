@@ -1,7 +1,7 @@
 'use strict';
 // Builds the SELECTs behind a table's Data tab: the "SQL expression" filter box, per-column filters,
 // sorting and paging. Values always go in as parameters.
-const { quoteIdent, qualified, placeholder } = require('../lib/sqltext.cjs');
+const { quoteIdent, qualified, placeholder, literal } = require('../lib/sqltext.cjs');
 
 const OPS = { eq: '=', ne: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
@@ -89,4 +89,46 @@ function wrapQuery(o) {
   return { sql: out, params };
 }
 
-module.exports = { buildSelect, buildCount, buildDistinct, buildDistinctWrapped, wrapQuery, whereClause };
+/**
+ * Statements that save edits made in the grid. Each one must touch exactly one row, or the whole batch rolls back.
+ * changes: [{ op: 'update', key: [{ col, v }], set: [{ col, v }] } | { op: 'insert', values: [{ col, v }] } | { op: 'delete', key }]
+ */
+function buildEdits({ dialect, schema, table, changes }) {
+  const t = qualified(schema, table, dialect);
+  const q = (c) => quoteIdent(c, dialect);
+  return changes.map((ch, i) => {
+    const params = [];
+    const p = (v) => { params.push(v); return placeholder(dialect, params.length); };
+    const match = (key) => {
+      if (!key?.length) throw new Error('A row to change has no key columns.');
+      return key.map((k) => (k.v === null ? `${q(k.col)} IS NULL` : `${q(k.col)} = ${p(k.v)}`)).join(' AND ');
+    };
+    const what = `Change ${i + 1} (${ch.op})`;
+    if (ch.op === 'update') {
+      if (!ch.set?.length) throw new Error('Nothing to update.');
+      const set = ch.set.map((c) => `${q(c.col)} = ${c.v === null ? 'NULL' : p(c.v)}`).join(', ');
+      return { sql: `UPDATE ${t} SET ${set} WHERE ${match(ch.key)}`, params, expect: 1, what };
+    }
+    if (ch.op === 'delete') return { sql: `DELETE FROM ${t} WHERE ${match(ch.key)}`, params, expect: 1, what };
+    if (ch.op === 'insert') {
+      const vals = ch.values || [];
+      if (!vals.length) {
+        const sql = dialect === 'mysql' ? `INSERT INTO ${t} () VALUES ()` : dialect === 'db2' ? `INSERT INTO ${t} (${q(ch.firstCol)}) VALUES (DEFAULT)` : `INSERT INTO ${t} DEFAULT VALUES`;
+        return { sql, params, expect: 1, what };
+      }
+      return { sql: `INSERT INTO ${t} (${vals.map((c) => q(c.col)).join(', ')}) VALUES (${vals.map((c) => (c.v === null ? 'NULL' : p(c.v))).join(', ')})`, params, expect: 1, what };
+    }
+    throw new Error(`Unknown change: ${ch.op}`);
+  });
+}
+
+/** The same statements with values written in, to show the user before saving. */
+function editsText(o) {
+  return buildEdits(o).map((st) => {
+    let i = 0;
+    const sql = o.dialect === 'pg' ? st.sql.replace(/\$(\d+)/g, (m, n) => literal(st.params[n - 1], o.dialect)) : st.sql.replace(/\?/g, () => literal(st.params[i++], o.dialect));
+    return sql + ';';
+  }).join('\n');
+}
+
+module.exports = { buildSelect, buildCount, buildDistinct, buildDistinctWrapped, wrapQuery, whereClause, buildEdits, editsText };

@@ -18,7 +18,7 @@ PostgreSQL · MySQL / MariaDB · SQLite · MongoDB · IBM Db2
 
 <sub>No build needed · free · <a href="#%EF%B8%8F-download">first-launch steps</a> · <a href="https://github.com/pucksaeroi-beep/pelican/releases">all releases</a></sub>
 
-[Download](#%EF%B8%8F-download) · [Features](#-features) · [Dumps](#-dumps) · [AI access (MCP)](#-ai-access-mcp) · [Shortcuts](#%EF%B8%8F-keyboard-shortcuts) · [Install from source](#-install-from-source) · [ภาษาไทย](#-ภาษาไทย)
+[Download](#%EF%B8%8F-download) · [Features](#-features) · [Dumps](#-dumps) · [Transfer](#-transfer) · [AI access (MCP)](#-ai-access-mcp) · [Shortcuts](#%EF%B8%8F-keyboard-shortcuts) · [Install from source](#-install-from-source) · [ภาษาไทย](#-ภาษาไทย)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.png" />
@@ -41,6 +41,7 @@ PostgreSQL · MySQL / MariaDB · SQLite · MongoDB · IBM Db2
 DBeaver can do almost anything, but most days you use a handful of features through a dated UI, and you can't hand a database to an AI assistant without handing over everything. Pelican keeps the features you reach for every day, makes them quick, and adds the two things DBeaver doesn't have:
 
 - 🗄 **Dumps that just work.** A whole database, some schemas, or a few tables. Dump structure, data, or both, from a right-click.
+- 🔁 **Transfer into your own database.** Copy a table, a schema or a whole database from a shared server into PostgreSQL, MySQL or SQLite on your Mac, across engines.
 - 🤖 **An MCP server with a permission panel.** For each connection you choose: hidden, read-only, or read & write. You can also share only some schemas or tables.
 - ⚡ **Cached results by default.** Reopening a table, paging back or re-running a read shows the rows already fetched. One click or ⌘R fetches fresh rows.
 - 🔌 **Connect in seconds.** Pelican finds the database servers running on your Mac. You can also paste a `postgres://…` URL. Passwords are stored as plain text, for local use.
@@ -49,10 +50,13 @@ DBeaver can do almost anything, but most days you use a handful of features thro
 
 | | |
 |---|---|
+| <img src="docs/screenshots/edit.png" alt="Editing rows in the grid" /> | **Edit rows in place**<br/>Double-click a cell, press ↵ or just start typing. Tab moves to the next cell. ⌫ sets NULL, ⌘⌫ deletes rows, ⌘D duplicates a row, and **+** adds one. The record panel (Space) edits the whole row, with long text and JSON on several lines.<br/><br/>Changes stay marked in the grid until you press **Save (⌘S)**. **Preview SQL** shows the statements first. They run in **one transaction**, and each must touch exactly one row, or nothing is saved. Rows are found by their primary key (MongoDB: `_id`). |
+| <img src="docs/screenshots/where.png" alt="WHERE box with autocomplete" /> | **A WHERE box that completes**<br/>The SQL expression box above every table completes column names (with their types), operators like `IS NOT NULL` and `BETWEEN`, and each engine's common functions. Click into an empty box to pick a filter you used on that table before. On MongoDB it completes field names and `$` operators. |
 | <img src="docs/screenshots/filter.png" alt="Column filter" /> | **Filter like a spreadsheet**<br/>Every column header has a filter. It lists the column's distinct values with counts, straight from the database. You can also set a condition (`=`, `>`, `contains`, `is NULL` …). Filters stack as chips you can remove one at a time.<br/><br/>Above the grid, the **SQL expression box** takes any `WHERE` clause, e.g. `total > 3000 AND ordered_at >= '2025-06-01'`. On MongoDB it takes a filter document instead. |
 | <img src="docs/screenshots/editor.png" alt="SQL editor" /> | **SQL editor**<br/>⌘↵ runs the statement under the cursor, ⇧⌘↵ runs the whole script, ⌘. cancels. Autocomplete knows your tables and columns, and the syntax follows each engine's dialect.<br/><br/>Results use the same grid: filter, sort, the record panel (↵), and copy as TSV / CSV / JSON / Markdown / `INSERT`. Each editor tab keeps its own session, so `BEGIN … COMMIT` and `SET` work. MongoDB tabs take mongosh syntax: `db.orders.find({…}).sort({…})` or `aggregate([…])`. |
 | <img src="docs/screenshots/plan.png" alt="Execution plan" /> | **Execution plans you can read**<br/>⌘E shows the estimated plan. ⇧⌘E runs `EXPLAIN ANALYZE` and adds real timings. Each step of the plan is shown with:<br/>• estimated vs. actual rows<br/>• a self-time bar<br/>• badges for **full scans** and **bad row estimates**<br/>Click a step to see all of its raw properties. Works on PostgreSQL, MySQL 8, SQLite, MongoDB (`executionStats`) and Db2. |
 | <img src="docs/screenshots/dump.png" alt="Dump dialog" /> | **Dumps**: see [below](#-dumps). |
+| <img src="docs/screenshots/transfer.png" alt="Transfer dialog" /> | **Transfer**: see [below](#-transfer). |
 | <img src="docs/screenshots/mcp.png" alt="AI access" /> | **AI access (MCP)**: see [below](#-ai-access-mcp). |
 | <img src="docs/screenshots/connect.png" alt="New connection" /> | **Connect fast**<br/>Pick an engine, click a server Pelican found on `localhost`, or paste a connection URL. Give production a colour tag so you can't mistake it. Test before you save. |
 
@@ -95,6 +99,24 @@ These tools are written in C and are what DBAs trust for restores. Otherwise the
 
 Built-in dumps of PostgreSQL, MySQL, SQLite and MongoDB were each restored into an empty database and compared row for row; the SQLite round trip runs in `npm test`.
 
+## 🔁 Transfer
+
+Copy data from one connection into another, usually from a shared server into a database on your Mac. Right-click a connection, database, schema or table and choose **Transfer…**, or press ⇧⌘T.
+
+| Choose | Options |
+|---|---|
+| **From** | Any connection, then tick tables, or a whole schema / database with one box |
+| **To** | Any connection of the same family (SQL → SQL, MongoDB → MongoDB). Local ones are listed first. Type a schema name to copy into a new one: Pelican creates it. |
+| **If it exists** | Stop · drop and recreate · empty it first · add rows |
+| **Copy** | Tables (structure) · rows · indexes |
+
+- **Between different engines** the column types are mapped, e.g. PostgreSQL `jsonb` → MySQL `json`, `bytea` → `longblob`, `timestamptz` → `datetime` in UTC, MySQL `tinyint(1)` → `boolean`. Between the same engine, types and defaults are copied as written.
+- **Keys and ids**: primary keys come along, `serial` / identity / `AUTO_INCREMENT` columns stay auto-numbered, and their counters continue after the highest copied id.
+- **Big tables** stream in batches. Each batch is a multi-row `INSERT` in its own transaction, so memory stays flat. Progress shows per table, and you can cancel.
+- The source is only read. Foreign keys, triggers and views are not copied.
+
+Every pair of engines was tried with mock data (PostgreSQL ⇄ MySQL ⇄ SQLite ⇄ Db2, MongoDB → MongoDB), including `bytea`, `jsonb`, `uuid`, arrays, enums, time zones and Thai text.
+
 ## 🤖 AI access (MCP)
 
 Pelican runs an [MCP](https://modelcontextprotocol.io) server on `127.0.0.1`, so Claude Code and other AI clients can explore and query your databases. They only get **what you allow**:
@@ -135,12 +157,16 @@ Every call shows up in the window's activity list. Queries, changes and refusals
 | ⌘. | Cancel the running query |
 | ⌘R | Refresh, skipping the cache |
 | ⇧⌘D | Dump… |
+| ⇧⌘T | Transfer… |
 | ⇧⌘M | AI access (MCP) |
 | ⌘J | Query Manager |
 | ⌘B | Sidebar |
 | ⌘1…9 · ⌃⇥ | Switch tabs |
 | ⌘W | Close tab |
-| ↵ in a grid | Record panel for the selected row |
+| ↵ · double-click · typing | Edit the cell (in a table tab) |
+| ⌫ · ⌘⌫ · ⌘D | Set NULL · delete rows · duplicate a row |
+| ⌘S | Save changes |
+| Space | Record panel for the selected row (↵ in query results) |
 | ⌘C in a grid | Copy the selection (right-click for CSV / JSON / INSERT / Markdown) |
 
 ## 📦 Install from source
@@ -161,7 +187,7 @@ npm run install-app        # builds Pelican.app and copies it to /Applications
 | `npm run dist` | Build `release/mac-arm64/Pelican.app` |
 | `npm run install-app` | `dist`, then copy to `/Applications` |
 | `npm run release` | `dist`, then publish the DMG as a GitHub release |
-| `npm test` | Statement splitting, SQL building, MCP permissions, dump round trips |
+| `npm test` | Statement splitting, SQL building, edits, type mapping, MCP permissions, dump round trips |
 
 **Try it with sample data.** `scripts/seed-demo.cjs` creates a made-up `shop` database: customers, products, orders and order items. All of it is mock data.
 
@@ -192,13 +218,14 @@ electron/
   main.cjs            window, menus, IPC, result cache wiring
   store.cjs           config, connections, history, editor tabs, result cache
   dump.cjs            native tools + built-in streaming dumper
+  transfer.cjs        copy tables between connections, with type mapping
   mcp.cjs             MCP server (Streamable HTTP) and permission checks
   drivers/            pg · mysql · sqlite (worker thread) · mongo · db2, one interface
   lib/sqltext.cjs     statement splitting, read-only checks, quoting
 src/
   views/              sidebar, table tab, SQL editor, Query Manager
-  dialogs/            connection, dump, AI access, settings
-  ui/                 virtual grid with filters, plan viewer, CodeMirror setup
+  dialogs/            connection, dump, transfer, AI access, settings
+  ui/                 virtual grid with filters and editing, plan viewer, CodeMirror setup
 scripts/              dev, packaging, release, demo data
 test/                 node --test suites
 ```
@@ -222,8 +249,17 @@ test/                 node --test suites
   - เลือกได้ว่าเอาโครงสร้าง ข้อมูล หรือทั้งสองอย่าง
   - ใช้ `pg_dump` / `mysqldump` / `mongodump` เมื่อมีในเครื่อง ถ้าไม่มีจะใช้ตัว dump ในแอป ซึ่งอ่านข้อมูลทีละชุด ตารางใหญ่แค่ไหนก็ไม่กินหน่วยความจำเพิ่ม
   - ไม่จำเป็นต้องเขียนด้วย Rust เพราะความเร็วขึ้นกับฐานข้อมูลและดิสก์ ไม่ได้ขึ้นกับภาษา
+- **แก้ข้อมูลในตารางได้เลย (inline edit):**
+  - ดับเบิลคลิกที่ช่อง กด ↵ หรือพิมพ์ทับได้ทันที กด Tab เพื่อไปช่องถัดไป
+  - ⌫ ตั้งค่าเป็น NULL, ⌘⌫ ลบแถว, ⌘D คัดลอกแถว, ปุ่ม **+** เพิ่มแถว และแก้ทั้งแถวได้ใน record panel (Space)
+  - ช่องที่แก้จะมีสีกำกับไว้จนกว่าจะกด **Save (⌘S)** กด **Preview SQL** เพื่อดูคำสั่งก่อนได้ ทุกคำสั่งรันใน transaction เดียว ถ้ามีคำสั่งไหนไม่ตรงกับหนึ่งแถวพอดี จะไม่บันทึกอะไรเลย
+- **Transfer (⇧⌘T):**
+  - คัดลอกตาราง ทั้ง schema หรือทั้ง database จาก server อื่นมาลง database ในเครื่องเรา
+  - ข้าม engine ได้ เช่น PostgreSQL → SQLite, MySQL → PostgreSQL, Db2 → MySQL โดยแปลงชนิดคอลัมน์ให้เอง
+  - เลือกได้ว่าถ้ามีตารางชื่อเดียวกันอยู่แล้วจะ หยุด, ลบแล้วสร้างใหม่, ล้างข้อมูลก่อน หรือเพิ่มแถวต่อท้าย
+  - คัดลอก primary key, index และ id ที่รันอัตโนมัติมาด้วย ตารางใหญ่แค่ไหนก็ไม่กินหน่วยความจำ
 - **ตัวกรอง:**
-  - ช่อง SQL expression (WHERE) อยู่เหนือตาราง
+  - ช่อง SQL expression (WHERE) อยู่เหนือตาราง พิมพ์แล้วมี autocomplete ชื่อคอลัมน์ (พร้อมชนิดข้อมูล), operator และฟังก์ชันที่ใช้บ่อย คลิกช่องว่างเพื่อเลือกตัวกรองที่เคยใช้กับตารางนั้น
   - ตัวกรองรายคอลัมน์แสดงค่าที่มีในคอลัมน์พร้อมจำนวน ติ๊กเลือกได้เหมือน Excel
   - ตั้งเงื่อนไขอย่าง `>`, `contains`, `is NULL` ได้ด้วย
 - **Query Manager (⌘J):** ประวัติทุก query ที่รัน ค้นหาได้ และกรองเฉพาะที่ error ได้

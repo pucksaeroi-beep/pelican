@@ -4,6 +4,10 @@
 //
 // mode 'server': sorting / filtering are handed to the owner (onQuery), who reloads rows from the database.
 // mode 'local' : everything happens on the rows already loaded.
+//
+// edit: when given, cells can be changed in place (double-click, Enter, F2 or just type). Changes stay in
+// the grid, marked, until the owner saves them: { why() → reason it is read-only | null, colWhy(c, ri),
+// editText(ri, c, value) → text to start from, onChange(), onSave() }
 import { h, icon, clear, fmtNum } from './h.js';
 import { contextMenu, popover, toast } from './overlay.js';
 
@@ -29,7 +33,11 @@ export function display(v) {
 }
 
 export class Grid {
-  constructor({ mode = 'local', onQuery, loadDistinct, onOpenRow, tableName, dialect, emptyText = 'No rows' } = {}) {
+  constructor({ mode = 'local', onQuery, loadDistinct, onOpenRow, tableName, dialect, emptyText = 'No rows', edit } = {}) {
+    this.edit = edit;
+    this.changes = new Map(); // row index → Map(column index → new value)
+    this.deleted = new Set(); // row indexes marked for deletion
+    this.added = new Set(); // row indexes of rows added in the grid
     this.mode = mode;
     this.onQuery = onQuery;
     this.loadDistinct = loadDistinct;
@@ -57,14 +65,22 @@ export class Grid {
     new ResizeObserver(() => this.schedule()).observe(this.scroller);
     this.el.addEventListener('keydown', (e) => this.key(e));
     this.body.addEventListener('mousedown', (e) => this.mouse(e));
-    this.body.addEventListener('dblclick', (e) => { const p = this.cellAt(e); if (p) { this.sel = { r: p.r, c: p.c, r2: p.r, c2: p.c }; this.toggleRecord(true); } });
+    this.body.addEventListener('dblclick', (e) => {
+      const p = this.cellAt(e);
+      if (!p) return;
+      if (p.c < 0) { this.toggleRecord(true); return; }
+      this.sel = { r: p.r, c: p.c, r2: p.r, c2: p.c };
+      if (this.edit) this.startEdit(p.r, p.c); else this.toggleRecord(true);
+    });
     this.body.addEventListener('contextmenu', (e) => this.cellMenu(e));
   }
 
   setData({ columns, rows }, { keepState = false } = {}) {
     const sameCols = keepState && this.columns.length === columns.length && this.columns.every((c, i) => c.name === columns[i].name);
+    this.cancelEdit();
     this.columns = columns;
     this.rows = rows;
+    this.changes.clear(); this.deleted.clear(); this.added.clear();
     if (!sameCols) { this.widths = this.measure(); if (!keepState) { this.order = []; this.filters = []; } this.sel = null; }
     this.recompute();
     this.renderHead();
@@ -244,11 +260,15 @@ export class Grid {
       const row = this.rows[ri];
       const rowEl = h('div', { class: 'g-row' + (r % 2 ? ' odd' : '') + (s && r >= s.r && r <= s.r2 ? ' sel' : ''), style: { top: r * ROW_H + 'px' } });
       rowEl.append(h('div', { class: 'g-cell g-rn' }, String(r + 1)));
+      if (this.deleted.has(ri)) rowEl.classList.add('deleted');
+      if (this.added.has(ri)) rowEl.classList.add('added');
+      const ch = this.changes.get(ri);
       for (let c = 0; c < this.columns.length; c++) {
-        const v = row[c];
+        const v = ch && ch.has(c) ? ch.get(c) : row[c];
         const cls = ['g-cell'];
+        if (ch && ch.has(c)) cls.push('edited');
         let text;
-        if (v === null) { cls.push('null'); text = 'NULL'; } else if (v === undefined) { cls.push('undef'); text = ''; } else {
+        if (v === null) { cls.push('null'); text = 'NULL'; } else if (v === undefined) { cls.push('undef'); text = this.added.has(ri) ? 'default' : ''; } else {
           text = typeof v === 'object' ? JSON.stringify(v) : String(v);
           if (typeof v === 'number' || NUM_TYPES.test(this.columns[c].type || '')) cls.push('num');
           else if (typeof v === 'boolean') cls.push('bool');
@@ -294,7 +314,18 @@ export class Grid {
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key === 'c') { e.preventDefault(); this.copySelection('tsv'); return; }
     if (mod && e.key === 'a') { e.preventDefault(); this.sel = { r: 0, c: 0, r2: this.view.length - 1, c2: this.columns.length - 1 }; this.render(true); return; }
+    if (mod && e.key === 's' && this.edit) { e.preventDefault(); this.edit.onSave?.(); return; }
     if (!this.sel) return;
+    if (this.edit) {
+      const n = norm(this.sel);
+      if (e.key === 'F2' || (e.key === 'Enter' && !e.shiftKey && !mod)) { e.preventDefault(); this.startEdit(this.sel.r, this.sel.c); return; }
+      if (mod && (e.key === 'Backspace' || e.key === 'Delete')) { e.preventDefault(); this.deleteRows(); return; }
+      if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); this.setSelected(null); return; }
+      if (mod && e.key === 'd') { e.preventDefault(); this.duplicateRow(n.r); return; }
+      if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); this.revertSelection(); return; }
+      if (e.key.length === 1 && !mod && !e.altKey && e.key !== ' ') { e.preventDefault(); this.startEdit(this.sel.r, this.sel.c, { text: e.key }); return; }
+      if (e.key === ' ' || (e.key === 'Enter' && e.shiftKey)) { e.preventDefault(); this.toggleRecord(); return; }
+    }
     const mv = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1], PageDown: [20, 0], PageUp: [-20, 0], Home: [0, -1e9], End: [0, 1e9] }[e.key];
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.toggleRecord(); return; }
     if (e.key === 'Escape' && this.recordOpen) { this.toggleRecord(false); return; }
@@ -323,7 +354,7 @@ export class Grid {
     const s = norm(this.sel);
     const cols = this.columns.slice(s.c, s.c2 + 1);
     const rows = [];
-    for (let r = s.r; r <= s.r2; r++) rows.push(this.rows[this.view[r]].slice(s.c, s.c2 + 1));
+    for (let r = s.r; r <= s.r2; r++) rows.push(this.current(this.view[r]).slice(s.c, s.c2 + 1));
     return { cols, rows };
   }
   copySelection(fmt) {
@@ -338,10 +369,24 @@ export class Grid {
     if (!p) return;
     if (!this.sel || !inSel(this.sel, p.r, Math.max(0, p.c))) { this.sel = { r: p.r, c: Math.max(0, p.c), r2: p.r, c2: p.c < 0 ? this.columns.length - 1 : p.c }; this.render(true); }
     const col = this.columns[Math.max(0, p.c)];
-    const v = this.rows[this.view[p.r]][Math.max(0, p.c)];
+    const ri = this.view[p.r];
+    const v = this.value(ri, Math.max(0, p.c));
     const vs = display(v);
+    const n = norm(this.sel);
+    const nRows = n.r2 - n.r + 1;
+    const editItems = this.edit ? [
+      { label: 'Edit cell', icon: 'edit', kbd: '↵', onClick: () => this.startEdit(p.r, Math.max(0, p.c)) },
+      { label: 'Set to NULL', kbd: '⌫', onClick: () => this.setSelected(null) },
+      this.isChanged(n) ? { label: 'Revert changes', icon: 'undo', kbd: '⌘Z', onClick: () => this.revertSelection() } : null,
+      '-',
+      { label: 'Add row', icon: 'plus', onClick: () => this.addRow() },
+      { label: 'Duplicate row', icon: 'copy', kbd: '⌘D', onClick: () => this.duplicateRow(p.r) },
+      { label: nRows > 1 ? `Delete ${nRows} rows` : 'Delete row', icon: 'trash', kbd: '⌘⌫', danger: true, onClick: () => this.deleteRows() },
+      '-',
+    ] : [];
     const short = vs == null ? 'NULL' : vs.length > 24 ? vs.slice(0, 24) + '…' : vs;
     contextMenu(e, [
+      ...editItems,
       { label: 'Copy', icon: 'copy', kbd: '⌘C', onClick: () => this.copySelection('tsv') },
       { label: 'Copy with headers', onClick: () => this.copySelection('tsvh') },
       { label: 'Copy as CSV', onClick: () => this.copySelection('csv') },
@@ -353,7 +398,7 @@ export class Grid {
       { label: `Filter: ${col.name} ≠ ${short}`, onClick: () => this.applyFilters([...this.filters.filter((f) => f.col !== col.name), v === null ? { col: col.name, op: 'notnull', values: [] } : { col: col.name, op: 'nin', values: [v] }]) },
       this.filters.length ? { label: 'Clear all filters', onClick: () => this.applyFilters([]) } : null,
       '-',
-      { label: this.recordOpen ? 'Hide record panel' : 'Show record panel', icon: 'rows', kbd: '↵', onClick: () => this.toggleRecord() },
+      { label: this.recordOpen ? 'Hide record panel' : 'Show record panel', icon: 'rows', kbd: this.edit ? 'Space' : '↵', onClick: () => this.toggleRecord() },
     ]);
   }
   toggleRecord(force) {
@@ -365,21 +410,201 @@ export class Grid {
     clear(this.record);
     if (!this.sel) { this.record.append(h('div', { class: 'muted rec-empty' }, 'Select a row')); return; }
     const r = this.sel.r2 ?? this.sel.r;
-    const row = this.rows[this.view[r]];
-    if (!row) return;
-    this.record.append(h('div', { class: 'rec-head' }, h('b', {}, `Row ${r + 1}`), h('span', { class: 'grow' }),
+    const ri = this.view[r];
+    if (!this.rows[ri]) return;
+    const row = this.current(ri);
+    const canEdit = this.edit && !this.edit.why?.() && !this.deleted.has(ri);
+    this.record.append(h('div', { class: 'rec-head' }, h('b', {}, `Row ${r + 1}`),
+      this.added.has(ri) ? h('span', { class: 'chip ok' }, 'new') : this.deleted.has(ri) ? h('span', { class: 'chip del' }, 'to delete') : this.changes.has(ri) ? h('span', { class: 'chip warn' }, 'edited') : null,
+      h('span', { class: 'grow' }),
       h('button', { class: 'icon-btn', title: 'Copy row as JSON', onclick: () => { copy(JSON.stringify(Object.fromEntries(this.columns.map((c, i) => [c.name, parseMaybe(row[i])])), null, 2)); toast('Copied row as JSON', 'ok', 1400); } }, icon('copy')),
       h('button', { class: 'icon-btn', title: 'Close', onclick: () => this.toggleRecord(false) }, icon('x'))));
     const list = h('div', { class: 'rec-list' });
     this.columns.forEach((c, i) => {
       const v = row[i];
-      let text = display(v);
+      const text = display(v);
       const pretty = text && (text[0] === '{' || text[0] === '[') ? tryPretty(text) : null;
-      list.append(h('div', { class: 'rec-row' + (i === this.sel.c ? ' cur' : '') },
-        h('div', { class: 'rec-k' }, icon(typeIcon(c.type), 'g-tic'), h('span', {}, c.name), h('span', { class: 'muted rec-t' }, c.type || '')),
-        h('div', { class: 'rec-v' + (v === null ? ' null' : '') + (pretty ? ' json' : ''), ondblclick: () => copy(text ?? '') }, v === null ? 'NULL' : pretty || text)));
+      const changed = this.changes.get(ri)?.has(i);
+      const colWhy = canEdit ? this.edit.colWhy?.(i, ri) : 'read-only';
+      let valEl;
+      if (canEdit && !colWhy) {
+        const start = this.edit.editText?.(ri, i, v) ?? (pretty || text || '');
+        valEl = h('textarea', { class: 'rec-in' + (v === null ? ' null' : '') + (pretty ? ' json' : ''), spellcheck: false, rows: 1, placeholder: v === null ? 'NULL' : v === undefined ? 'default' : '' });
+        valEl.value = v == null ? '' : start;
+        const fit = () => { valEl.style.height = 'auto'; valEl.style.height = Math.min(240, valEl.scrollHeight + 2) + 'px'; };
+        requestAnimationFrame(fit);
+        valEl.addEventListener('input', fit);
+        const commit = () => {
+          const t = valEl.value;
+          if (v == null && t === '') return; // still NULL / default
+          if (t === (v == null ? '' : start)) return;
+          this.setCell(ri, i, pretty && tryPretty(t) === pretty ? text : t);
+        };
+        valEl.addEventListener('keydown', (e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); valEl.blur(); }
+          if (e.key === 'Escape') { valEl.value = v == null ? '' : start; valEl.blur(); }
+        });
+        valEl.addEventListener('blur', commit);
+      } else valEl = h('div', { class: 'rec-v' + (v === null ? ' null' : '') + (pretty ? ' json' : ''), ondblclick: () => copy(text ?? '') }, v === null ? 'NULL' : v === undefined && this.added.has(ri) ? 'default' : pretty || text);
+      list.append(h('div', { class: 'rec-row' + (i === this.sel.c ? ' cur' : '') + (changed ? ' edited' : '') },
+        h('div', { class: 'rec-k' }, icon(typeIcon(c.type), 'g-tic'), h('span', {}, c.name), changed ? h('button', { class: 'rec-act', title: 'Undo this change', onclick: () => this.revertCell(ri, i) }, icon('undo')) : null,
+          canEdit && !colWhy && v !== null ? h('button', { class: 'rec-act', title: 'Set to NULL', onclick: () => this.setCell(ri, i, null) }, 'NULL') : null,
+          h('span', { class: 'muted rec-t' }, c.type || '')),
+        valEl));
     });
     this.record.append(list);
+  }
+
+  // ---------- editing ----------
+  value(ri, c) { const m = this.changes.get(ri); return m && m.has(c) ? m.get(c) : this.rows[ri][c]; }
+  current(ri) { const m = this.changes.get(ri); const r = this.rows[ri]; return m ? r.map((v, c) => (m.has(c) ? m.get(c) : v)) : r; }
+  dirty() { return this.changes.size > 0 || this.deleted.size > 0 || this.added.size > 0; }
+  counts() {
+    let updated = 0;
+    for (const ri of this.changes.keys()) if (!this.added.has(ri) && !this.deleted.has(ri)) updated++;
+    return { updated, added: this.added.size, deleted: [...this.deleted].filter((ri) => !this.added.has(ri)).length };
+  }
+  isChanged(n) { for (let r = n.r; r <= n.r2; r++) { const ri = this.view[r]; if (this.changes.has(ri) || this.deleted.has(ri) || this.added.has(ri)) return true; } return false; }
+  changed() { this.render(true); this.edit?.onChange?.(); }
+  same(a, b) { return (a === null) === (b === null) && (a === undefined) === (b === undefined) && display(a) === display(b); }
+  setCell(ri, c, v) {
+    if (this.deleted.has(ri)) return;
+    const orig = this.rows[ri][c];
+    let m = this.changes.get(ri);
+    if (!this.added.has(ri) && this.same(v, orig)) { m?.delete(c); if (m && !m.size) this.changes.delete(ri); }
+    else { if (!m) this.changes.set(ri, (m = new Map())); m.set(c, v); }
+    this.changed();
+  }
+  setSelected(v) {
+    if (!this.sel || this.blocked()) return;
+    const n = norm(this.sel);
+    for (let r = n.r; r <= n.r2; r++) for (let c = n.c; c <= n.c2; c++) { const ri = this.view[r]; if (!this.edit.colWhy?.(c, ri)) this.setCell(ri, c, v); }
+  }
+  revertCell(ri, c) { const m = this.changes.get(ri); m?.delete(c); if (m && !m.size) this.changes.delete(ri); this.changed(); }
+  revertSelection() {
+    if (!this.sel) return;
+    const n = norm(this.sel);
+    const drop = [];
+    for (let r = n.r; r <= n.r2; r++) {
+      const ri = this.view[r];
+      if (this.added.has(ri)) { drop.push(ri); continue; }
+      this.deleted.delete(ri);
+      const m = this.changes.get(ri);
+      if (m) { for (let c = n.c; c <= n.c2; c++) m.delete(c); if (!m.size || n.c2 - n.c + 1 === this.columns.length) this.changes.delete(ri); }
+    }
+    this.removeAdded(drop);
+    this.changed();
+  }
+  /** The changes are in the database now: make them the grid's own values. */
+  applySaved() {
+    this.cancelEdit();
+    for (const [ri, m] of this.changes) if (!this.deleted.has(ri)) for (const [c, v] of m) this.rows[ri][c] = v;
+    this.changes.clear();
+    this.removeAdded([...this.deleted]);
+    this.deleted.clear();
+    this.changed();
+  }
+  revertAll() { this.cancelEdit(); this.removeAdded([...this.added]); this.changes.clear(); this.deleted.clear(); this.changed(); }
+  removeAdded(list) {
+    if (!list.length) return;
+    const gone = new Set(list);
+    const keep = this.rows.map((_, i) => i).filter((i) => !gone.has(i));
+    const remap = new Map(keep.map((old, i) => [old, i]));
+    this.rows = keep.map((i) => this.rows[i]);
+    const mv = (set) => new Set([...set].filter((i) => remap.has(i)).map((i) => remap.get(i)));
+    this.changes = new Map([...this.changes].filter(([i]) => remap.has(i)).map(([i, m]) => [remap.get(i), m]));
+    this.deleted = mv(this.deleted); this.added = mv(this.added);
+    this.recompute();
+    if (this.sel) { const max = this.view.length - 1; this.sel = max < 0 ? null : { ...this.sel, r: Math.min(this.sel.r, max), r2: Math.min(this.sel.r2, max) }; }
+  }
+  blocked() { const why = this.edit?.why?.(); if (why) toast(why, 'info', 3200); return !this.edit || !!why; }
+  addRow(values) {
+    if (this.blocked()) return;
+    this.cancelEdit();
+    const row = values || this.columns.map(() => undefined);
+    this.rows.push(this.columns.map(() => undefined));
+    const ri = this.rows.length - 1;
+    this.added.add(ri);
+    const m = new Map();
+    row.forEach((v, c) => { if (v !== undefined) m.set(c, v); });
+    if (m.size) this.changes.set(ri, m);
+    this.recompute();
+    const r = this.view.indexOf(ri);
+    this.sel = { r, c: 0, r2: r, c2: 0 };
+    this.reveal(r, 0);
+    this.changed();
+    return r;
+  }
+  duplicateRow(r) {
+    const ri = this.view[r];
+    if (ri == null) return;
+    const src = this.current(ri);
+    this.addRow(src.map((v, c) => (this.edit?.skipOnCopy?.(c) ? undefined : v)));
+  }
+  deleteRows() {
+    if (!this.sel || this.blocked()) return;
+    const n = norm(this.sel);
+    const drop = [];
+    for (let r = n.r; r <= n.r2; r++) { const ri = this.view[r]; if (this.added.has(ri)) drop.push(ri); else this.deleted.add(ri); }
+    this.removeAdded(drop);
+    this.changed();
+  }
+  startEdit(r, c, { text } = {}) {
+    if (this.blocked()) return;
+    const ri = this.view[r];
+    if (ri == null || c < 0) return;
+    if (this.deleted.has(ri)) { toast('This row is marked for deletion. Revert it (⌘Z) to edit.', 'info'); return; }
+    const why = this.edit.colWhy?.(c, ri);
+    if (why) { toast(why, 'info', 3200); return; }
+    this.commitEdit();
+    const cur = this.value(ri, c);
+    const start = cur == null ? '' : this.edit.editText?.(ri, c, cur) ?? display(cur);
+    const init = text ?? start;
+    const multi = start.length > 80 || start.includes('\n');
+    const el = h(multi ? 'textarea' : 'input', { class: 'g-editor' + (multi ? ' multi' : ''), spellcheck: false, placeholder: cur === null ? 'NULL' : cur === undefined ? 'default' : '' });
+    el.value = init;
+    let x = 52; for (let i = 0; i < c; i++) x += this.widths[i];
+    Object.assign(el.style, { left: x + 'px', top: this.head.offsetHeight + r * ROW_H + 'px', width: Math.max(this.widths[c], multi ? 360 : 120) + 'px' });
+    this.editing = { r, c, ri, el, start, cur };
+    el.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); this.cancelEdit(); }
+      else if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); this.commitEdit(); if (r < this.view.length - 1 && !(e.metaKey || e.ctrlKey)) { this.sel = { r: r + 1, c, r2: r + 1, c2: c }; this.reveal(r + 1, c); this.render(true); } }
+      else if (e.key === 'Tab') {
+        e.preventDefault(); this.commitEdit();
+        const nc = c + (e.shiftKey ? -1 : 1);
+        if (nc >= 0 && nc < this.columns.length) { this.sel = { r, c: nc, r2: r, c2: nc }; this.reveal(r, nc); this.render(true); this.startEdit(r, nc); }
+      } else if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); this.commitEdit(); this.edit.onSave?.(); }
+    });
+    el.addEventListener('blur', () => this.commitEdit(false));
+    this.scroller.append(el);
+    el.focus();
+    if (text != null) el.setSelectionRange(el.value.length, el.value.length); else el.select();
+  }
+  commitEdit(refocus = true) {
+    const ed = this.editing;
+    if (!ed) return;
+    this.editing = null;
+    const v = ed.el.value;
+    ed.el.remove();
+    if (!(ed.cur == null && v === '') && v !== ed.start) this.setCell(ed.ri, ed.c, v);
+    if (refocus) this.el.focus({ preventScroll: true });
+  }
+  cancelEdit() {
+    const ed = this.editing;
+    if (!ed) return;
+    this.editing = null;
+    ed.el.remove();
+    this.el.focus({ preventScroll: true });
+  }
+  /** Changes as rows: { updates: [{ ri, row, set: [c] }], inserts: [{ ri, values: Map }], deletes: [{ ri, row }] } */
+  pending() {
+    const updates = []; const inserts = []; const deletes = [];
+    for (const ri of this.added) inserts.push({ ri, values: this.changes.get(ri) || new Map() });
+    for (const ri of this.deleted) if (!this.added.has(ri)) deletes.push({ ri, row: this.rows[ri] });
+    for (const [ri, m] of this.changes) if (!this.added.has(ri) && !this.deleted.has(ri)) updates.push({ ri, row: this.rows[ri], set: m });
+    return { updates, inserts, deletes };
   }
 }
 

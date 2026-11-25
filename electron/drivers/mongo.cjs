@@ -222,6 +222,39 @@ class MongoDriver {
     return { kind: 'mongo', plan, raw: r, analyzed: !!es };
   }
   async planTables(db, text, { schema } = {}) { return this.inspect(text, schema || this.defaultDb()).tables; }
+
+  /** Grid edits. key = [{ col: '_id', v: EJSON }]; set / values = [{ col, v: text | null, orig: EJSON }]. */
+  editOps(changes) {
+    const doc = (list) => Object.fromEntries((list || []).map((c) => [c.col, mongoValue(c.v, c.orig)]));
+    return changes.map((ch) => {
+      const id = ch.key ? EJSON.deserialize({ v: ch.key.find((k) => k.col === '_id')?.v }).v : undefined;
+      if (ch.op !== 'insert' && id === undefined) throw new Error('A document to change has no _id.');
+      if (ch.op === 'update') return { op: 'updateOne', filter: { _id: id }, update: { $set: doc(ch.set) } };
+      if (ch.op === 'delete') return { op: 'deleteOne', filter: { _id: id } };
+      return { op: 'insertOne', doc: doc(ch.values) };
+    });
+  }
+  async applyEdits(schema, coll, changes) {
+    const c = this.client.db(schema).collection(coll);
+    const ops = this.editOps(changes);
+    let done = 0;
+    for (const o of ops) {
+      const r = o.op === 'insertOne' ? await c.insertOne(o.doc) : o.op === 'deleteOne' ? await c.deleteOne(o.filter) : await c.updateOne(o.filter, o.update);
+      const n = o.op === 'insertOne' ? 1 : o.op === 'deleteOne' ? r.deletedCount : r.matchedCount;
+      if (n !== 1) throw new Error(`Change ${done + 1} found no document with that _id${done ? ` (the ${done} change${done > 1 ? 's' : ''} before it were saved)` : ''}. Refresh and try again.`);
+      done++;
+    }
+    return ops.map(() => 1);
+  }
+  editsText(coll, changes) {
+    const name = `db.getCollection(${JSON.stringify(coll)})`;
+    return this.editOps(changes).map((o) => {
+      const j = (v) => EJSON.stringify(v, { relaxed: true });
+      if (o.op === 'insertOne') return `${name}.insertOne(${j(o.doc)});`;
+      if (o.op === 'deleteOne') return `${name}.deleteOne(${j(o.filter)});`;
+      return `${name}.updateOne(${j(o.filter)}, ${j(o.update)});`;
+    }).join('\n');
+  }
   async *stream(db, coll, batch = 1000, schema) {
     const cur = this.client.db(schema).collection(coll).find({}, { batchSize: batch });
     let buf = [];
@@ -230,6 +263,25 @@ class MongoDriver {
   }
 }
 
+/** A value typed in the grid, given the field's old value (relaxed EJSON) so numbers stay numbers, dates stay dates. */
+function mongoValue(text, orig) {
+  if (text === null) return null;
+  const s = String(text);
+  const ejson = () => EJSON.parse(s, { relaxed: true });
+  if (typeof orig === 'number') { if (s.trim() === '' || isNaN(s)) throw new Error(`“${s}” is not a number.`); return Number(s); }
+  if (typeof orig === 'boolean') { if (!/^(true|false)$/i.test(s.trim())) throw new Error(`“${s}” is not true or false.`); return /^true$/i.test(s.trim()); }
+  if (orig && typeof orig === 'object') {
+    if ('$oid' in orig) return new ObjectId(s.trim());
+    if ('$date' in orig) { const d = new Date(s.trim()); if (isNaN(d)) throw new Error(`“${s}” is not a date.`); return d; }
+    if ('$numberDecimal' in orig) return Decimal128.fromString(s.trim());
+    if ('$numberLong' in orig) return Long.fromString(s.trim());
+    try { return ejson(); } catch { throw new Error(`The value of an object or array field must be JSON: ${s.slice(0, 60)}`); }
+  }
+  if (orig === undefined || orig === null) {
+    if (/^\s*[[{]/.test(s) || /^(true|false|-?\d+(\.\d+)?)$/.test(s.trim())) { try { return ejson(); } catch { /* plain text */ } }
+  }
+  return s;
+}
 function num(v) { return typeof v === 'string' && v.trim() !== '' && !isNaN(v) ? Number(v) : v; }
 function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function typeOf(v) {

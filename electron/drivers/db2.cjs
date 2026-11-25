@@ -1,6 +1,6 @@
 'use strict';
 // IBM Db2 (LUW) through ibm_db, which bundles IBM's CLI driver.
-const { cell, Queue } = require('./base.cjs');
+const { cell, Queue, txMismatch } = require('./base.cjs');
 const { statementKind, quoteIdent, qualified } = require('../lib/sqltext.cjs');
 
 let ibmdb;
@@ -105,6 +105,23 @@ class Db2Driver {
       } finally { this.stmt = null; stmt.closeSync(); }
     });
   }
+  async tx(db, stmts) {
+    return this.queue.run(async () => {
+      this.conn.beginTransactionSync();
+      try {
+        const out = [];
+        for (const st of stmts) {
+          const stmt = await this.conn.prepare(st.sql);
+          let n;
+          try { n = await stmt.executeNonQuery((st.params || []).map(db2Param)); } finally { stmt.closeSync(); }
+          out.push(n);
+          if (st.expect != null && n !== st.expect) throw new Error(txMismatch(st, n));
+        }
+        this.conn.commitTransactionSync();
+        return out;
+      } catch (e) { try { this.conn.rollbackTransactionSync(); } catch { /* connection gone */ } throw e; }
+    });
+  }
   async cancel() { if (this.stmt) await this.conn.cancel(this.stmt).catch(() => {}); }
   async *stream(db, sql, batch = 2000) {
     // a second connection so the UI stays usable during a long dump
@@ -190,4 +207,9 @@ function db2Type(x) {
   return t;
 }
 
+/** ibm_db binds buffers only when told they are binary. */
+function db2Param(v) {
+  if (Buffer.isBuffer(v) || v instanceof Uint8Array) return { ParamType: 'INPUT', DataType: 'BLOB', Data: Buffer.from(v) };
+  return v;
+}
 module.exports = { Db2Driver };

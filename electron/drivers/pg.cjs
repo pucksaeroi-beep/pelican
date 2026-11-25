@@ -1,7 +1,7 @@
 'use strict';
 const pg = require('pg');
 const Cursor = require('pg-cursor');
-const { cell } = require('./base.cjs');
+const { cell, txMismatch } = require('./base.cjs');
 const { statementKind, quoteIdent, qualified } = require('../lib/sqltext.cjs');
 
 // Keep dates, times, int8 and numeric as the server's text: no time-zone shifts, no float rounding.
@@ -80,7 +80,7 @@ class PgDriver {
   async indexes(db, schema, table) {
     const r = await this.q(db, `
       select i.relname as name, ix.indisunique as unique, ix.indisprimary as primary, pg_get_indexdef(ix.indexrelid) as def,
-             (select string_agg(pg_get_indexdef(ix.indexrelid, k, true), ', ' order by k) from generate_subscripts(ix.indkey, 1) k) as columns
+             (select string_agg(pg_get_indexdef(ix.indexrelid, k, true), ', ' order by k) from generate_series(1, ix.indnkeyatts) k) as columns
       from pg_index ix join pg_class i on i.oid = ix.indexrelid join pg_class t on t.oid = ix.indrelid join pg_namespace n on n.oid = t.relnamespace
       where n.nspname = $1 and t.relname = $2 order by ix.indisprimary desc, i.relname`, [schema, table]);
     return r.rows;
@@ -158,6 +158,22 @@ class PgDriver {
     return { client: s.client, done: () => {} };
   }
   endSession(session) { const s = this.sessions.get(session); if (s) { s.client.release(true); this.sessions.delete(session); } }
+  /** Run statements in one transaction. A statement with `expect` must touch exactly that many rows. */
+  async tx(db, stmts) {
+    const client = await this.pool(db).connect();
+    let broken;
+    try {
+      await client.query('BEGIN');
+      const out = [];
+      for (const st of stmts) {
+        const r = await client.query(st.sql, st.params || []);
+        out.push(r.rowCount);
+        if (st.expect != null && r.rowCount !== st.expect) throw new Error(txMismatch(st, r.rowCount));
+      }
+      await client.query('COMMIT');
+      return out;
+    } catch (e) { await client.query('ROLLBACK').catch((x) => { broken = x; }); throw e; } finally { client.release(broken); }
+  }
 
   async query(db, sql, params = [], { maxRows = 1000, readOnly = false, session, runId, schema } = {}) {
     const { client, done } = await this.client(db, readOnly ? null : session);

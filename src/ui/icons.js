@@ -63,6 +63,9 @@ export const ICONS = {
   wand: s('<path d="m15 4 5 5L9 20H4v-5z"/><path d="m13 6 5 5"/>'),
   disconnect: s('<path d="m19 5-3 3M5 19l3-3M8.5 8.5l7 7"/><path d="M14 4l6 6-3 3-6-6zM10 20l-6-6 3-3 6 6z"/>'),
   globe: s('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
+  undo: s('<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>'),
+  save: s('<path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/>'),
+  transfer: s('<path d="M4 8h13l-3-3M20 16H7l3 3"/>'),
   scan: s('<path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/>'),
 };
 

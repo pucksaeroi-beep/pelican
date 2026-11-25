@@ -125,6 +125,14 @@ class SqliteDriver {
     return { kind: 'sqlite', plan: root.children.length === 1 ? root.children[0] : root };
   }
   async planTables(db, sql) { return this.call('planTables', { sql }); }
+  async tx(db, stmts) { return this.call('tx', { stmts: stmts.map((st) => ({ ...st, params: (st.params || []).map(sqliteParam) })) }); }
 }
 
-module.exports = { SqliteDriver, qualified };
+/** node:sqlite binds numbers, strings, bigints, buffers and null only. */
+function sqliteParam(v) {
+  if (v === undefined) return null;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (v && typeof v === 'object' && !(v instanceof Uint8Array)) return JSON.stringify(v);
+  return v;
+}
+module.exports = { SqliteDriver, qualified, sqliteParam };

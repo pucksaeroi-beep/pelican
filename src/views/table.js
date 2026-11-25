@@ -1,8 +1,8 @@
 // A table (or collection) tab: Data, Columns, Indexes, DDL.
 import { h, icon, clear, fmtNum, fmtMs, ago } from '../ui/h.js';
-import { Grid, format } from '../ui/grid.js';
-import { contextMenu, toast } from '../ui/overlay.js';
-import { createEditor } from '../ui/code.js';
+import { Grid, format, typeIcon } from '../ui/grid.js';
+import { contextMenu, toast, confirmBox, modal } from '../ui/overlay.js';
+import { createEditor, createLineEditor } from '../ui/code.js';
 import { app, api } from '../app.js';
 import { engineBadge } from './sidebar.js';
 
@@ -20,27 +20,48 @@ export class TableView {
     this.state = { where: '', filters: [], order: [], offset: 0 };
     this.sub = addr.tab || 'data';
 
+    this.docs = []; // MongoDB: the documents behind the rows (relaxed EJSON), for _id and value types
     this.grid = new Grid({
       mode: 'server', dialect: this.dialect, tableName: app.qualified(this.conn, addr.schema, addr.table),
-      onQuery: ({ order, filters }) => { this.state.order = order; this.state.filters = filters; this.load(); },
+      onQuery: async ({ order, filters }) => {
+        if (!(await this.okToDiscard())) { this.grid.setState({ order: this.state.order, filters: this.state.filters }); return; }
+        this.state.order = order; this.state.filters = filters; this.load({ discard: true });
+      },
       loadDistinct: (col, filters) => api.data.distinct({ ...this.base(), col, where: this.state.where, filters }),
+      edit: {
+        why: () => this.readOnlyReason(),
+        colWhy: (c, ri) => this.colReason(c, ri),
+        editText: (ri, c, v) => this.editText(ri, c, v),
+        skipOnCopy: (c) => { const m = this.metaOf(c); return this.mongo ? this.grid.columns[c]?.name === '_id' : !!(m && (m.pk || m.auto)); },
+        onChange: () => this.drawEditBar(),
+        onSave: () => this.save(),
+      },
     });
-    this.filterInput = h('input', { class: 'input mono filter-input', spellcheck: false, list: 'pel-filter-hist-' + addr.connId,
+    const host = h('div', { class: 'input mono filter-input' });
+    this.filterInput = createLineEditor({
+      parent: host, lang: this.mongo ? 'mongo' : this.dialect, fontSize: 12.5,
       placeholder: this.mongo ? '{ status: "paid", total: { $gt: 100 } }   — MongoDB filter, Enter to apply' : 'Enter a SQL expression to filter results, e.g.  total > 100 AND status = \'paid\'   — Enter to apply',
-      onkeydown: (e) => { if (e.key === 'Enter') this.applyWhere(); if (e.key === 'Escape') { this.filterInput.value = ''; this.applyWhere(); } } });
+      recent: () => this.recentFilters(),
+      onEnter: () => this.applyWhere(),
+      onEscape: () => { if (this.filterInput.value) { this.filterInput.value = ''; this.applyWhere(); } else this.grid.el.focus(); },
+    });
+    this.filterHost = host;
     this.chips = h('div', { class: 'chips' });
     this.foot = h('div', { class: 'res-foot' });
+    this.editBar = h('div', { class: 'edit-bar', style: { display: 'none' } });
     this.dataPane = h('div', { class: 'pane data-pane' },
       h('div', { class: 'filter-bar' },
         h('span', { class: 'filter-lbl' }, this.mongo ? icon('braces') : 'WHERE'),
-        this.filterInput,
+        host,
+        h('button', { class: 'icon-btn', title: 'Recent filters', onclick: (e) => this.recentMenu(e) }, icon('history')),
         h('button', { class: 'icon-btn', title: 'Apply filter (Enter)', onclick: () => this.applyWhere() }, icon('play')),
         h('button', { class: 'icon-btn', title: 'Clear all filters', onclick: () => { this.filterInput.value = ''; this.state.filters = []; this.grid.setState({ filters: [] }); this.applyWhere(); } }, icon('x')),
         h('span', { class: 'tb-sep' }),
+        this.addBtn = h('button', { class: 'icon-btn', title: 'Add a row', onclick: () => { const r = this.grid.addRow(); if (r != null) this.grid.startEdit(r, this.firstEditable()); } }, icon('plus')),
         h('button', { class: 'icon-btn', title: 'Refresh from the database (⌘R)', onclick: () => this.load({ refresh: true }) }, icon('refresh')),
-        h('button', { class: 'icon-btn', title: 'Record panel (↵)', onclick: () => this.grid.toggleRecord() }, icon('rows')),
+        h('button', { class: 'icon-btn', title: 'Record panel (Space)', onclick: () => this.grid.toggleRecord() }, icon('rows')),
         h('button', { class: 'icon-btn', title: 'Export…', onclick: (e) => this.exportMenu(e) }, icon('upload'))),
-      this.chips, this.grid.el, this.foot);
+      this.chips, this.grid.el, this.editBar, this.foot);
 
     this.panes = { data: this.dataPane, columns: h('div', { class: 'pane pad' }), indexes: h('div', { class: 'pane pad' }), ddl: h('div', { class: 'pane ddl-pane' }) };
     this.tabsEl = h('div', { class: 'subtabs' });
@@ -50,7 +71,130 @@ export class TableView {
     this.drawTabs();
     this.show(this.sub);
     this.load();
-    this.refreshHistList();
+    this.loadColumns();
+  }
+  async loadColumns() {
+    try {
+      this.meta = await api.meta.columns(this.addr.connId, this.addr.db, this.addr.schema, this.addr.table);
+      for (const m of this.meta) m.auto = this.isAuto(m);
+      this.filterInput.setColumns(this.meta);
+      this.addBtn.disabled = !!this.readOnlyReason();
+      this.addBtn.title = this.readOnlyReason() || 'Add a row';
+    } catch (e) { this.metaError = e.message; }
+  }
+  isAuto(m) {
+    return m.ident === 'a' || m.ident === 'd' || m.ident === true || /^nextval\(/i.test(String(m.default || '')) || /auto_increment/i.test(m.extra || '') || (this.conn.type === 'sqlite' && m.pk && /^integer$/i.test(m.type) && this.meta.filter((x) => x.pk).length === 1);
+  }
+
+  // ---------- editing ----------
+  metaOf(c) { const name = this.grid.columns[c]?.name; return this.meta?.find((m) => m.name === name); }
+  /** Columns that pick out one row: the primary key, or every comparable column when there is none. */
+  keyCols() {
+    if (!this.meta) return [];
+    if (this.mongo) return ['_id'];
+    const pk = this.meta.filter((m) => m.pk).map((m) => m.name);
+    if (pk.length) return pk;
+    return this.meta.filter((m) => !/json|xml|clob|blob|bytea|binary|geometry|graphic/i.test(m.type || '')).map((m) => m.name);
+  }
+  readOnlyReason() {
+    if (this.addr.kind === 'view') return 'Views are read-only here — open the table it reads from to edit.';
+    if (this.conn.readOnly) return 'This connection is opened read-only (Edit connection to change it).';
+    if (this.metaError) return 'Columns could not be read: ' + this.metaError;
+    if (!this.meta) return 'Loading the table\'s columns…';
+    if (!this.keyCols().length) return 'This table has no primary key or comparable column, so a row cannot be picked out safely.';
+    return null;
+  }
+  colReason(c, ri) {
+    const col = this.grid.columns[c];
+    if (!col) return 'Unknown column';
+    const m = this.metaOf(c);
+    const added = this.grid.added.has(ri);
+    if (this.mongo) return col.name === '_id' && !added ? '_id cannot be changed. Duplicate the document (⌘D) to give it a new _id.' : null;
+    if (!m) return `${col.name} is not a column of this table.`;
+    if (typeIcon(m.type) === 'binary' || typeIcon(col.type) === 'binary') return 'Binary values cannot be edited in the grid.';
+    if (m.gen === 's' || (/GENERATED/i.test(m.extra || '') && !/DEFAULT_GENERATED/i.test(m.extra || ''))) return `${col.name} is a generated column.`;
+    if (m.ident === 'a') return `${col.name} is GENERATED ALWAYS — the database fills it in.`;
+    const v = this.grid.rows[ri]?.[c];
+    if (typeof v === 'string' && v.length >= 20000 && v.endsWith('…')) return 'This value is too long to edit in the grid — use an UPDATE in the SQL editor.';
+    return null;
+  }
+  editText(ri, c, v) {
+    if (!this.mongo) return null;
+    const d = this.docs[ri]?.[this.grid.columns[c].name];
+    if (d && typeof d === 'object' && !this.grid.changes.get(ri)?.has(c)) {
+      if ('$oid' in d) return d.$oid;
+      if ('$date' in d) return typeof d.$date === 'string' ? d.$date : d.$date.$numberLong ? new Date(+d.$date.$numberLong).toISOString() : String(d.$date);
+      for (const k of ['$numberDecimal', '$numberLong', '$numberInt', '$numberDouble']) if (k in d) return d[k];
+      return JSON.stringify(d, null, 2);
+    }
+    return null;
+  }
+  firstEditable() { const i = this.grid.columns.findIndex((c, ci) => !this.colReason(ci, this.grid.rows.length - 1) && !this.metaOf(ci)?.auto && c.name !== '_id'); return Math.max(0, i); }
+  changesList() {
+    const p = this.grid.pending();
+    const cols = this.grid.columns;
+    const keys = this.keyCols();
+    const idx = (name) => cols.findIndex((c) => c.name === name);
+    const key = (ri, row) => (this.mongo ? [{ col: '_id', v: this.docs[ri]?._id }] : keys.map((k) => ({ col: k, v: row[idx(k)] ?? null })));
+    const orig = (ri, c) => (this.mongo ? this.docs[ri]?.[cols[c].name] : undefined);
+    const list = [];
+    for (const d of p.deletes) list.push({ op: 'delete', key: key(d.ri, d.row) });
+    for (const u of p.updates) list.push({ op: 'update', key: key(u.ri, u.row), set: [...u.set].map(([c, v]) => ({ col: cols[c].name, v, orig: orig(u.ri, c) })) });
+    for (const n of p.inserts) list.push({ op: 'insert', values: [...n.values].filter(([, v]) => v !== undefined).map(([c, v]) => ({ col: cols[c].name, v, orig: this.mongo ? this.sampleOf(cols[c].name) : undefined })), firstCol: this.meta?.[0]?.name });
+    return list;
+  }
+  /** a value of this field in some loaded document, so a new document's field gets the same type */
+  sampleOf(name) { for (const d of this.docs) if (d && d[name] !== undefined && d[name] !== null) return d[name]; return undefined; }
+  drawEditBar() {
+    clear(this.editBar);
+    const n = this.grid.counts();
+    const total = n.updated + n.added + n.deleted;
+    this.editBar.style.display = total ? '' : 'none';
+    app.emit('editor-changed');
+    if (!total) return;
+    const parts = [n.updated && `${n.updated} edited`, n.added && `${n.added} new`, n.deleted && `${n.deleted} to delete`].filter(Boolean);
+    this.editBar.append(icon('edit'), h('b', {}, `${total} unsaved change${total > 1 ? 's' : ''}`), h('span', { class: 'muted' }, parts.join(' · ')), h('span', { class: 'grow' }),
+      h('button', { class: 'btn sm ghost', onclick: () => this.preview() }, icon('code'), 'Preview SQL'),
+      h('button', { class: 'btn sm', onclick: () => this.grid.revertAll() }, icon('undo'), 'Discard'),
+      this.saveBtn = h('button', { class: 'btn sm primary', onclick: () => this.save() }, icon('save'), 'Save', h('kbd', {}, '⌘S')));
+  }
+  dirty() { return this.grid.dirty(); }
+  async okToDiscard() {
+    this.grid.commitEdit(false);
+    if (!this.grid.dirty()) return true;
+    const n = this.grid.counts();
+    const ok = await confirmBox({ title: 'Discard unsaved changes?', message: `${n.updated + n.added + n.deleted} change${n.updated + n.added + n.deleted > 1 ? 's' : ''} to ${this.addr.table} have not been saved.`, ok: 'Discard', danger: true });
+    if (ok) this.grid.revertAll();
+    return ok;
+  }
+  async preview() {
+    this.grid.commitEdit(false);
+    try {
+      const text = await api.data.previewEdits({ ...this.base(), changes: this.changesList() });
+      const host = h('div', { class: 'preview-code' });
+      let ed;
+      const m = modal({ title: 'Changes to save', subtitle: this.mongo ? 'Run one after another, in this order.' : 'Run together in one transaction — if any statement does not touch exactly one row, nothing is saved.', width: 760, body: host, onClose: () => ed?.destroy(),
+        foot: [h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: () => { api.clipboard.write(text); toast('Copied', 'ok', 1200); } }, icon('copy'), 'Copy'), h('button', { class: 'btn', onclick: () => m.close() }, 'Close'), h('button', { class: 'btn primary', onclick: () => { m.close(); this.save(); } }, icon('save'), 'Save')] });
+      ed = createEditor({ parent: host, doc: text, lang: this.mongo ? 'mongo' : this.dialect, readOnly: true, fontSize: app.state.settings.fontSize });
+    } catch (e) { toast(e.message, 'error', 6000); }
+  }
+  async save() {
+    this.grid.commitEdit(false);
+    if (!this.grid.dirty() || this.saving) return;
+    let changes;
+    try { changes = this.changesList(); } catch (e) { toast(e.message, 'error'); return; }
+    this.saving = true;
+    if (this.saveBtn) this.saveBtn.disabled = true;
+    try {
+      await api.data.applyEdits({ ...this.base(), changes });
+      toast(`Saved ${changes.length} change${changes.length > 1 ? 's' : ''} to ${this.addr.table}`, 'ok', 2200);
+      // keep rows where they are (a reload without ORDER BY can shuffle them); new rows need the database's
+      // defaults (ids…) and MongoDB documents their stored form, so those reload
+      if (this.mongo || this.grid.added.size) { this.grid.revertAll(); await this.load({ refresh: true, discard: true, keepScroll: true }); }
+      else { this.grid.applySaved(); this.drawEditBar(); }
+    } catch (e) {
+      toast(e.message, 'error', 8000);
+    } finally { this.saving = false; if (this.saveBtn) this.saveBtn.disabled = false; }
   }
   base() { return { connId: this.addr.connId, db: this.addr.db, schema: this.addr.schema, table: this.addr.table }; }
   crumbs() {
@@ -70,29 +214,30 @@ export class TableView {
     if (k !== 'data' && !this.metaLoaded) this.loadMeta();
   }
 
-  applyWhere() {
+  async applyWhere() {
+    if (!(await this.okToDiscard())) return;
     const w = this.filterInput.value.trim();
     this.state.where = w;
     if (w) {
       try {
         const all = JSON.parse(localStorage.getItem(FILTER_HISTORY) || '{}');
-        const list = [w, ...(all[this.addr.connId] || []).filter((x) => x !== w)].slice(0, 30);
-        all[this.addr.connId] = list;
+        const list = [w, ...(all[this.histKey()] || []).filter((x) => x !== w)].slice(0, 30);
+        all[this.histKey()] = list;
         localStorage.setItem(FILTER_HISTORY, JSON.stringify(all));
       } catch { /* private mode */ }
-      this.refreshHistList();
     }
-    this.load();
+    this.load({ discard: true });
   }
-  refreshHistList() {
-    const id = 'pel-filter-hist-' + this.addr.connId;
-    let dl = document.getElementById(id);
-    if (!dl) { dl = h('datalist', { id }); document.body.append(dl); }
-    clear(dl);
-    try { for (const v of JSON.parse(localStorage.getItem(FILTER_HISTORY) || '{}')[this.addr.connId] || []) dl.append(h('option', { value: v })); } catch { /* none */ }
+  histKey() { return `${this.addr.connId}\u0000${this.addr.db || ''}\u0000${this.addr.schema}\u0000${this.addr.table}`; }
+  recentFilters() { try { return JSON.parse(localStorage.getItem(FILTER_HISTORY) || '{}')[this.histKey()] || []; } catch { return []; } }
+  recentMenu(e) {
+    const list = this.recentFilters();
+    contextMenu({ anchor: e.currentTarget }, list.length ? [{ header: 'Recent filters' }, ...list.slice(0, 20).map((v) => ({ label: v.length > 90 ? v.slice(0, 90) + '…' : v, onClick: () => { this.filterInput.value = v; this.applyWhere(); } }))] : [{ header: 'No recent filters yet' }]);
   }
 
-  async load({ refresh = false, more = false } = {}) {
+  async load({ refresh = false, more = false, discard = false, keepScroll = false } = {}) {
+    if (!discard && !more && !(await this.okToDiscard())) return;
+    const scroll = keepScroll ? [this.grid.scroller.scrollTop, this.grid.scroller.scrollLeft] : null;
     const offset = more ? this.state.offset + this.pageSize : 0;
     const seq = (this.seq = (this.seq || 0) + 1);
     this.setFoot('loading');
@@ -101,8 +246,10 @@ export class TableView {
       const r = await api.data.table({ ...this.base(), where: this.state.where, filters: this.state.filters, order: this.state.order, limit: this.pageSize, offset, refresh });
       if (seq !== this.seq) return;
       this.state.offset = offset;
-      if (more) this.grid.appendRows(r.result.rows);
-      else this.grid.setData(r.result, { keepState: true });
+      if (more) { this.grid.appendRows(r.result.rows); this.docs.push(...(r.result.docs || [])); }
+      else { this.grid.setData(r.result, { keepState: true }); this.docs = r.result.docs || []; }
+      if (scroll) { this.grid.scroller.scrollTop = scroll[0]; this.grid.scroller.scrollLeft = scroll[1]; }
+      this.drawEditBar();
       this.grid.setState({ order: this.state.order, filters: this.state.filters });
       this.last = r;
       this.hasMore = r.result.truncated;
@@ -194,12 +341,13 @@ export class TableView {
     }
   }
   command(cmd) {
-    if (cmd === 'refresh') { this.load({ refresh: true }); if (this.metaLoaded) this.loadMeta(true); return true; }
+    if (cmd === 'refresh') { this.load({ refresh: true }); if (this.metaLoaded) this.loadMeta(true); this.loadColumns(); return true; }
+    if (cmd === 'save') { this.save(); return true; }
     if (cmd === 'find') { this.filterInput.focus(); return true; }
     return false;
   }
   focus() { if (this.sub === 'data') this.grid.el.focus({ preventScroll: true }); }
-  destroy() { this.ddlEd?.destroy(); }
+  destroy() { this.ddlEd?.destroy(); this.filterInput.destroy(); }
   key() { return `table:${this.addr.connId}:${this.addr.db}:${this.addr.schema}:${this.addr.table}`; }
 }
 export { format };

@@ -28,6 +28,19 @@ const ops = {
     return { columns: cols.map((c) => ({ name: c.name, type: (c.type || '').toLowerCase(), table: c.table || undefined })), rows, affected: null, truncated };
   },
   exec({ sql }) { db.exec(sql); return true; },
+  tx({ stmts }) {
+    db.exec('BEGIN');
+    try {
+      const out = [];
+      for (const st of stmts) {
+        const n = Number(db.prepare(st.sql).run(...(st.params || [])).changes);
+        out.push(n);
+        if (st.expect != null && n !== st.expect) throw new Error(`${st.what || 'A statement'} matched ${n} rows instead of ${st.expect}, so nothing was saved. The row may have been changed or deleted by someone else — refresh and try again.`);
+      }
+      db.exec('COMMIT');
+      return out;
+    } catch (e) { try { db.exec('ROLLBACK'); } catch { /* already rolled back */ } throw e; }
+  },
   /** Tables a statement reads or writes: OpenRead/OpenWrite root pages from its bytecode. */
   planTables({ sql }) {
     const pages = new Map();

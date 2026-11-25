@@ -8,6 +8,7 @@ import { EditorView } from './views/editor.js';
 import { HistoryPanel } from './views/history.js';
 import { connectionDialog } from './dialogs/connection.js';
 import { dumpDialog } from './dialogs/dump.js';
+import { transferDialog } from './dialogs/transfer.js';
 import { mcpDialog } from './dialogs/mcp.js';
 import { settingsDialog } from './dialogs/settings.js';
 import { ENGINES } from './ui/icons.js';
@@ -73,7 +74,11 @@ function activate(t) {
   drawStatus();
   setTimeout(() => t.view.focus?.(), 0);
 }
-function closeTab(t) {
+async function closeTab(t, { force = false } = {}) {
+  if (!force && t.view.dirty?.()) {
+    activate(t);
+    if (!(await t.view.okToDiscard())) return;
+  }
   const i = tabs.indexOf(t);
   if (i < 0) return;
   tabs.splice(i, 1);
@@ -93,12 +98,13 @@ function drawTabs() {
     const el = h('div', { class: 'tab' + (t === active ? ' on' : ''), title: v.addr ? `${c?.name} · ${v.addr.schema || ''}.${v.addr.table}` : `${v.title}${c ? ' · ' + c.name : ''}` },
       c?.color ? h('span', { class: 'tab-color', style: { background: c.color } }) : null,
       icon(v.iconName, 'tab-ic ' + v.iconName), h('span', { class: 'tab-t' }, v.addr ? v.title : `${c ? c.name : 'Script'}`), v instanceof EditorView ? h('span', { class: 'tab-sub' }, v.schema || '') : null,
+      v.dirty?.() ? h('span', { class: 'tab-dirty', title: 'Unsaved changes' }) : null,
       h('button', { class: 'tab-x', title: 'Close (⌘W)', onclick: (e) => { e.stopPropagation(); closeTab(t); } }, icon('x')));
     el.addEventListener('mousedown', (e) => { if (e.button === 1) { e.preventDefault(); closeTab(t); } else if (e.button === 0 && !e.target.closest('.tab-x')) activate(t); });
     el.addEventListener('contextmenu', (e) => contextMenu(e, [
       { label: 'Close', kbd: '⌘W', onClick: () => closeTab(t) },
-      { label: 'Close others', onClick: () => [...tabs].filter((x) => x !== t).forEach(closeTab) },
-      { label: 'Close all', onClick: () => [...tabs].forEach(closeTab) },
+      { label: 'Close others', onClick: async () => { for (const x of [...tabs]) if (x !== t) await closeTab(x); } },
+      { label: 'Close all', onClick: async () => { for (const x of [...tabs]) await closeTab(x); } },
     ]));
     return el;
   })), h('button', { class: 'icon-btn tab-new', title: 'New SQL editor (⌘T)', onclick: () => newEditor() }, icon('plus')), h('span', { class: 'grow' }));
@@ -123,6 +129,7 @@ function showWelcome() {
       h('button', { class: 'w-act', onclick: () => connectionDialog() }, icon('plus'), h('b', {}, 'New connection'), h('span', { class: 'muted' }, '⌘N')),
       h('button', { class: 'w-act', onclick: () => newEditor() }, icon('code'), h('b', {}, 'SQL editor'), h('span', { class: 'muted' }, '⌘T')),
       h('button', { class: 'w-act', onclick: () => dumpDialog() }, icon('download'), h('b', {}, 'Dump'), h('span', { class: 'muted' }, '⇧⌘D')),
+      h('button', { class: 'w-act', onclick: () => transferDialog() }, icon('transfer'), h('b', {}, 'Transfer'), h('span', { class: 'muted' }, '⇧⌘T')),
       h('button', { class: 'w-act', onclick: () => mcpDialog() }, icon('sparkles'), h('b', {}, 'AI access (MCP)'), h('span', { class: 'muted' }, '⇧⌘M'))),
     found,
     h('div', { class: 'w-keys' }, [['⌘↵', 'Run statement'], ['⇧⌘↵', 'Run script'], ['⌘E', 'Explain plan'], ['⌘R', 'Refresh, skip cache'], ['⌘J', 'Query Manager'], ['⌘B', 'Sidebar']].map(([k, l]) => h('div', {}, h('kbd', {}, k), h('span', {}, l)))));
@@ -169,6 +176,7 @@ function command(cmd, arg) {
     case 'new-connection': connectionDialog(); break;
     case 'new-editor': newEditor(); break;
     case 'dump': dumpDialog(active?.view.addr ? { connId: active.view.addr.connId, db: active.view.addr.db, schema: active.view.addr.schema, tables: [active.view.addr.table] } : { connId: active?.view.connId }); break;
+    case 'transfer': transferDialog(active?.view.addr ? { connId: active.view.addr.connId, db: active.view.addr.db, schema: active.view.addr.schema, tables: [active.view.addr.table] } : { connId: active?.view.connId }); break;
     case 'mcp': mcpDialog(); break;
     case 'settings': settingsDialog(); break;
     case 'close-tab': if (active) closeTab(active); break;
@@ -191,6 +199,9 @@ function wire() {
   app.on('open-editor', (o) => newEditor(o));
   app.on('insert-text', (t) => { if (active?.view instanceof EditorView) active.view.insert(t); else newEditor({ text: t }); });
   app.on('dump', (o) => dumpDialog(o));
+  app.on('transfer', (o) => transferDialog(o));
+  app.on('meta-stale', (id) => { sidebar.forget(id); sidebar.render(); });
+  app.on('reveal-connection', (id) => { sidebar.forget(id); sidebar.toggle(id, true); });
   app.on('mcp', (o) => { if (o && o.connId) mcpDialog(o); else { drawStatus(); } });
   app.on('edit-connection', (c) => connectionDialog(c));
   app.on('editor-changed', () => { drawTabs(); drawStatus(); persistTabs(); });
@@ -199,7 +210,7 @@ function wire() {
   app.on('refresh-meta', () => {});
   app.on('data-changed', () => {});
   app.on('delete-connection', async (id) => {
-    for (const t of [...tabs]) if ((t.view.addr?.connId || t.view.connId) === id) closeTab(t);
+    for (const t of [...tabs]) if ((t.view.addr?.connId || t.view.connId) === id) closeTab(t, { force: true });
     await api.conn.remove(id);
     app.state.connections = app.state.connections.filter((c) => c.id !== id);
     app.state.live.delete(id);
