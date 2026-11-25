@@ -1,5 +1,5 @@
 // A table (or collection) tab: Data, Columns, Indexes, DDL.
-import { h, icon, clear, fmtNum, fmtMs, ago } from '../ui/h.js';
+import { h, icon, clear, fmtNum, fmtMs, ago, fmtBytes } from '../ui/h.js';
 import { Grid, format, typeIcon } from '../ui/grid.js';
 import { contextMenu, toast, confirmBox, modal } from '../ui/overlay.js';
 import { createEditor, createLineEditor } from '../ui/code.js';
@@ -63,7 +63,7 @@ export class TableView {
         h('button', { class: 'icon-btn', title: 'Export…', onclick: (e) => this.exportMenu(e) }, icon('upload'))),
       this.chips, this.grid.el, this.editBar, this.foot);
 
-    this.panes = { data: this.dataPane, columns: h('div', { class: 'pane pad' }), indexes: h('div', { class: 'pane pad' }), ddl: h('div', { class: 'pane ddl-pane' }) };
+    this.panes = { data: this.dataPane, columns: h('div', { class: 'pane pad' }), indexes: h('div', { class: 'pane pad' }), ddl: h('div', { class: 'pane ddl-pane' }), partitions: h('div', { class: 'pane pad' }) };
     this.tabsEl = h('div', { class: 'subtabs' });
     this.el = h('div', { class: 'view table-view' },
       h('div', { class: 'view-head' }, this.tabsEl, h('span', { class: 'grow' }), this.crumbs()),
@@ -73,7 +73,7 @@ export class TableView {
     this.load();
     this.loadColumns();
   }
-  async loadColumns() {
+  async loadColumns(refresh) {
     try {
       this.meta = await api.meta.columns(this.addr.connId, this.addr.db, this.addr.schema, this.addr.table);
       for (const m of this.meta) m.auto = this.isAuto(m);
@@ -81,6 +81,29 @@ export class TableView {
       this.addBtn.disabled = !!this.readOnlyReason();
       this.addBtn.title = this.readOnlyReason() || 'Add a row';
     } catch (e) { this.metaError = e.message; }
+    if (this.conn.type === 'postgres') {
+      this.parts = await api.meta.partitions(this.addr.connId, this.addr.db, this.addr.schema, this.addr.table, refresh).catch(() => null);
+      if (this.parts) { this.drawTabs(); this.drawPartitions(); }
+    }
+  }
+  /** Partitioned table: its key and partitions. Partition: the table it belongs to and its bound. */
+  drawPartitions() {
+    const p = this.parts;
+    const el = clear(this.panes.partitions);
+    if (!p) return;
+    const open = (schema, table) => app.emit('open-table', { connId: this.addr.connId, db: this.addr.db, schema, table, kind: 'table' });
+    if (p.partitionOf) {
+      el.append(h('div', { class: 'pane-title' }, 'Partition of'),
+        h('p', {}, h('button', { class: 'link', onclick: () => open(p.partitionOf.schema, p.partitionOf.table) }, `${p.partitionOf.schema}.${p.partitionOf.table}`), ' ', h('code', { class: 'part-key' }, p.partitionOf.bound)),
+        p.root && p.root.table !== p.partitionOf.table ? h('p', { class: 'muted' }, 'Top-level table: ', h('button', { class: 'link', onclick: () => open(p.root.schema, p.root.table) }, `${p.root.schema}.${p.root.table}`)) : null,
+        h('p', { class: 'muted' }, 'Rows of this partition are also rows of the partitioned table. Query the partitioned table with a filter on its partition key and PostgreSQL reads only the partitions that can match.'));
+    }
+    if (p.key) {
+      const g = new Grid({ mode: 'local', onOpenRow: (row) => open(row[0], row[1]) });
+      g.setData({ columns: [{ name: 'schema' }, { name: 'partition' }, { name: 'bound' }, { name: 'level', type: 'int' }, { name: 'rows (est.)', type: 'int' }, { name: 'size' }, { name: 'sub-partitioned by' }],
+        rows: p.partitions.map((x) => [x.schema, x.name, x.bound.replace(/^FOR VALUES /, ''), x.level, x.rows, x.size != null ? fmtBytes(x.size) : null, x.key ?? null]) });
+      el.append(h('div', { class: 'pane-title' }, 'PARTITION BY ', h('code', { class: 'part-key' }, p.key), ` · ${p.partitions.length} partitions — double-click one to open it`), h('div', { class: 'mini-grid' }, g.el));
+    }
   }
   isAuto(m) {
     return m.ident === 'a' || m.ident === 'd' || m.ident === true || /^nextval\(/i.test(String(m.default || '')) || /auto_increment/i.test(m.extra || '') || (this.conn.type === 'sqlite' && m.pk && /^integer$/i.test(m.type) && this.meta.filter((x) => x.pk).length === 1);
@@ -205,13 +228,14 @@ export class TableView {
   drawTabs() {
     clear(this.tabsEl);
     const tabs = [['data', 'Data', 'table'], ['columns', this.mongo ? 'Fields' : 'Columns', 'column'], ['indexes', 'Indexes & keys', 'index'], ['ddl', this.mongo ? 'Definition' : 'DDL', 'file']];
+    if (this.parts) tabs.splice(3, 0, ['partitions', this.parts.key ? `Partitions (${this.parts.partitions.length})` : 'Partition of', 'layers']);
     for (const [k, label, ic] of tabs) this.tabsEl.append(h('button', { class: 'subtab' + (this.sub === k ? ' on' : ''), onclick: () => this.show(k) }, icon(ic), label));
   }
   show(k) {
     this.sub = k;
     this.drawTabs();
     for (const [name, el] of Object.entries(this.panes)) el.style.display = name === k ? '' : 'none';
-    if (k !== 'data' && !this.metaLoaded) this.loadMeta();
+    if (k !== 'data' && k !== 'partitions' && !this.metaLoaded) this.loadMeta();
   }
 
   async applyWhere() {
@@ -341,7 +365,7 @@ export class TableView {
     }
   }
   command(cmd) {
-    if (cmd === 'refresh') { this.load({ refresh: true }); if (this.metaLoaded) this.loadMeta(true); this.loadColumns(); return true; }
+    if (cmd === 'refresh') { this.load({ refresh: true }); if (this.metaLoaded) this.loadMeta(true); this.loadColumns(true); return true; }
     if (cmd === 'save') { this.save(); return true; }
     if (cmd === 'find') { this.filterInput.focus(); return true; }
     return false;

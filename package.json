@@ -1,7 +1,7 @@
 {
   "name": "pelican",
   "productName": "Pelican",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A fast, modern database client for macOS \u2014 PostgreSQL, MySQL, SQLite, MongoDB and DB2, with dumps and a permissioned MCP server",
   "main": "electron/main.cjs",
   "type": "module",

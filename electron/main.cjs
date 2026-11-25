@@ -242,9 +242,10 @@ function registerIpc() {
   handle('meta:objects', (id, db, schema, refresh) => cachedMeta(id, ['objects', db, schema], refresh, (d) => d.objects(db, schema)));
   handle('meta:columns', (id, db, schema, table, refresh) => cachedMeta(id, ['columns', db, schema, table], refresh, (d) => d.columns(db, schema, table)));
   handle('meta:table', (id, db, schema, table, refresh) => cachedMeta(id, ['table', db, schema, table], refresh, async (d) => {
-    const [columns, indexes, fks, ddl] = await Promise.all([d.columns(db, schema, table), d.indexes(db, schema, table).catch(() => []), d.foreignKeys(db, schema, table).catch(() => []), d.ddl(db, schema, table).catch((e) => `-- ${e.message}`)]);
-    return { columns, indexes, fks, ddl };
+    const [columns, indexes, fks, ddl, partitions] = await Promise.all([d.columns(db, schema, table), d.indexes(db, schema, table).catch(() => []), d.foreignKeys(db, schema, table).catch(() => []), d.ddl(db, schema, table).catch((e) => `-- ${e.message}`), d.partitions ? d.partitions(db, schema, table).catch(() => null) : null]);
+    return { columns, indexes, fks, ddl, partitions };
   }));
+  handle('meta:partitions', (id, db, schema, table, refresh) => cachedMeta(id, ['partitions', db, schema, table], refresh, (d) => (d.partitions ? d.partitions(db, schema, table) : null)));
   handle('meta:info', (id) => { const l = live.get(id); return l ? { version: l.version, dialect: l.driver.dialect } : null; });
 
   handle('data:table', (o) => tableData(o));

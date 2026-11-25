@@ -7,6 +7,14 @@ const { statementKind, quoteIdent, qualified } = require('../lib/sqltext.cjs');
 // Keep dates, times, int8 and numeric as the server's text: no time-zone shifts, no float rounding.
 for (const oid of [1082, 1083, 1114, 1184, 1266, 20, 1700]) pg.types.setTypeParser(oid, (v) => v);
 
+/** Every relation below oid in a partition tree (oid itself included), as a FROM item with column oid. */
+const TREE = (oid) => `(with recursive t(oid) as (select ${oid} union all select i.inhrelid from pg_inherits i join t on i.inhparent = t.oid) select oid from t)`;
+/** The partitioned tables above a partition, nearest first, as a FROM item with columns anc, depth. */
+const ANCESTORS = (oid) => `(with recursive a(anc, depth) as (
+  select i.inhparent, 1 from pg_inherits i where i.inhrelid = ${oid}
+  union all select i.inhparent, a.depth + 1 from a join pg_inherits i on i.inhrelid = a.anc join pg_class pc on pc.oid = a.anc where pc.relispartition)
+  select anc, depth from a)`;
+
 const SYSTEM = /^(pg_catalog|information_schema|pg_toast|pg_temp_\d+|pg_toast_temp_\d+)$/;
 
 class PgDriver {
@@ -57,14 +65,58 @@ class PgDriver {
     return r.rows.map((x) => x.name).filter((n) => system || !SYSTEM.test(n));
   }
   async objects(db, schema) {
+    // A partitioned table holds no rows itself: its count and size are the sum over its leaf partitions.
     const r = await this.q(db, `
-      select c.relname as name, c.relkind as kind, greatest(c.reltuples, -1)::bigint as est,
-             case when c.relkind in ('r','p','m') then pg_total_relation_size(c.oid) end as size,
+      select c.relname as name, c.relkind as kind,
+             case when c.relkind = 'p' then (select sum(greatest(l.reltuples, 0))::bigint from ${TREE('c.oid')} t join pg_class l on l.oid = t.oid where l.relkind <> 'p')
+                  else greatest(c.reltuples, -1)::bigint end as est,
+             case when c.relkind = 'p' then (select sum(pg_total_relation_size(t.oid))::bigint from ${TREE('c.oid')} t)
+                  when c.relkind in ('r','m') then pg_total_relation_size(c.oid) end as size,
+             case when c.relkind = 'p' then pg_get_partkeydef(c.oid) end as partkey,
+             case when c.relkind = 'p' then (select count(*) from pg_inherits i where i.inhparent = c.oid)::int end as parts,
              obj_description(c.oid, 'pg_class') as comment
       from pg_class c join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = $1 and c.relkind in ('r','p','v','m','f') and not c.relispartition
       order by c.relname`, [schema]);
-    return r.rows.map((x) => ({ name: x.name, kind: x.kind === 'v' || x.kind === 'm' ? 'view' : 'table', sub: { r: 'table', p: 'partitioned', v: 'view', m: 'materialized view', f: 'foreign table' }[x.kind], rows: x.est >= 0 ? +x.est : null, size: x.size != null ? +x.size : null, comment: x.comment }));
+    return r.rows.map((x) => ({ name: x.name, kind: x.kind === 'v' || x.kind === 'm' ? 'view' : 'table', sub: { r: 'table', p: 'partitioned', v: 'view', m: 'materialized view', f: 'foreign table' }[x.kind], rows: x.est != null && +x.est >= 0 ? +x.est : null, size: x.size != null ? +x.size : null, comment: x.comment, partitionKey: x.partkey || undefined, partitions: x.parts ?? undefined }));
+  }
+  /**
+   * Partitioning of one table: its key and every partition below it (sub-partitions included, parents first),
+   * or, for a partition, the table it belongs to and its bound. null when the table is not partitioned at all.
+   */
+  async partitions(db, schema, table) {
+    const me = await this.q(db, `
+      select c.oid, c.relkind, c.relispartition, case when c.relkind = 'p' then pg_get_partkeydef(c.oid) end as key,
+             pg_get_expr(c.relpartbound, c.oid) as bound, pn.nspname as parent_schema, p.relname as parent,
+             rn.nspname as root_schema, r.relname as root
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      left join pg_inherits i on c.relispartition and i.inhrelid = c.oid
+      left join pg_class p on p.oid = i.inhparent left join pg_namespace pn on pn.oid = p.relnamespace
+      left join lateral (select a.anc from ${ANCESTORS('c.oid')} a order by a.depth desc limit 1) ra on true
+      left join pg_class r on r.oid = ra.anc left join pg_namespace rn on rn.oid = r.relnamespace
+      where n.nspname = $1 and c.relname = $2`, [schema, table]);
+    const m = me.rows[0];
+    if (!m || (m.relkind !== 'p' && !m.relispartition)) return null;
+    const out = { key: m.key || null, partitionOf: m.relispartition ? { schema: m.parent_schema, table: m.parent, bound: m.bound } : null,
+      root: m.relispartition ? { schema: m.root_schema, table: m.root } : null, partitions: [] };
+    if (m.relkind === 'p') {
+      const r = await this.q(db, `
+        with recursive t(oid, parent, level) as (
+          select i.inhrelid, i.inhparent, 1 from pg_inherits i where i.inhparent = $1
+          union all select i.inhrelid, i.inhparent, t.level + 1 from t join pg_inherits i on i.inhparent = t.oid)
+        select n.nspname as schema, c.relname as name, p.relname as parent, t.level, c.relkind = 'p' as partitioned,
+               pg_get_expr(c.relpartbound, c.oid) as bound, case when c.relkind = 'p' then pg_get_partkeydef(c.oid) end as key,
+               case when c.relkind = 'p' then (select sum(greatest(l.reltuples, 0))::bigint from ${TREE('c.oid')} x join pg_class l on l.oid = x.oid where l.relkind <> 'p')
+                    else greatest(c.reltuples, -1)::bigint end as est,
+               case when c.relkind = 'p' then (select sum(pg_total_relation_size(x.oid))::bigint from ${TREE('c.oid')} x) else pg_total_relation_size(c.oid) end as size
+        from t join pg_class c on c.oid = t.oid join pg_namespace n on n.oid = c.relnamespace join pg_class p on p.oid = t.parent
+        order by t.level, pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', c.relname`, [m.oid]);
+      const all = r.rows.map((x) => ({ schema: x.schema, name: x.name, parent: x.parent, level: x.level, partitioned: x.partitioned, bound: x.bound, key: x.key || undefined, rows: x.est != null && +x.est >= 0 ? +x.est : null, size: x.size != null ? +x.size : null }));
+      // tree order: each sub-partitioned partition is followed by its own partitions
+      const kids = (parent, level) => all.filter((x) => x.parent === parent && x.level === level).flatMap((x) => [x, ...kids(x.name, level + 1)]);
+      out.partitions = kids(table, 1);
+    }
+    return out;
   }
   async columns(db, schema, table) {
     const r = await this.q(db, `
@@ -94,10 +146,11 @@ class PgDriver {
     return r.rows;
   }
   async ddl(db, schema, table, { foreignKeys = true } = {}) {
-    const k = await this.q(db, `select c.relkind, pg_get_viewdef(c.oid, true) as viewdef from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = $1 and c.relname = $2`, [schema, table]);
+    const k = await this.q(db, `select c.relkind, c.relispartition, case when c.relkind = 'p' then pg_get_partkeydef(c.oid) end as partkey, pg_get_viewdef(c.oid, true) as viewdef from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = $1 and c.relname = $2`, [schema, table]);
     if (!k.rows.length) throw new Error(`${schema}.${table} not found`);
     const name = qualified(schema, table, 'pg');
-    const { relkind, viewdef } = k.rows[0];
+    const { relkind, relispartition, partkey, viewdef } = k.rows[0];
+    if (relispartition) return this.partitionDdl(db, schema, table, partkey);
     if (relkind === 'v') return `CREATE OR REPLACE VIEW ${name} AS\n${viewdef.trim()}\n`;
     if (relkind === 'm') return `CREATE MATERIALIZED VIEW ${name} AS\n${viewdef.trim()}\n`;
     const cols = await this.columns(db, schema, table);
@@ -116,11 +169,44 @@ class PgDriver {
     });
     // foreign keys go after all tables in a dump; inline them here for the DDL tab only
     for (const c of cons.rows) if (foreignKeys || c.contype !== 'f') lines.push(`  CONSTRAINT ${quoteIdent(c.name, 'pg')} ${c.def}`);
-    let out = `CREATE TABLE ${name} (\n${lines.join(',\n')}\n);\n`;
-    for (const ix of await this.indexes(db, schema, table)) if (!ix.primary && !cons.rows.some((c) => c.name === ix.name)) out += ix.def + ';\n';
+    let out = `CREATE TABLE ${name} (\n${lines.join(',\n')}\n)${partkey ? ` PARTITION BY ${partkey}` : ''};\n`;
+    if (partkey) {
+      // the partitions themselves, parents before their sub-partitions; rows inserted into the parent are routed to them
+      const parts = (await this.partitions(db, schema, table))?.partitions || [];
+      for (const p of parts) out += `CREATE TABLE ${qualified(p.schema, p.name, 'pg')} PARTITION OF ${qualified(p.level === 1 ? schema : parts.find((x) => x.name === p.parent)?.schema || schema, p.parent, 'pg')} ${p.bound}${p.key ? ` PARTITION BY ${p.key}` : ''};\n`;
+    }
+    // an index on a partitioned table prints as "ON ONLY", which would not build it on the partitions
+    for (const ix of await this.indexes(db, schema, table)) if (!ix.primary && !cons.rows.some((c) => c.name === ix.name)) out += ix.def.replace(/ ON ONLY /, ' ON ') + ';\n';
+    if (partkey) for (const p of (await this.partitions(db, schema, table))?.partitions || []) out += await this.ownExtras(db, p.schema, p.name);
     const tc = await this.q(db, `select obj_description(($1)::regclass, 'pg_class') as c`, [name]);
     if (tc.rows[0]?.c) out += `COMMENT ON TABLE ${name} IS '${tc.rows[0].c.replace(/'/g, "''")}';\n`;
     for (const c of cols) if (c.comment) out += `COMMENT ON COLUMN ${name}.${quoteIdent(c.name, 'pg')} IS '${c.comment.replace(/'/g, "''")}';\n`;
+    return out;
+  }
+
+  /** A partition: PARTITION OF its parent, plus what it has of its own (constraints and indexes not inherited). */
+  async partitionDdl(db, schema, table, partkey) {
+    const info = await this.partitions(db, schema, table);
+    const name = qualified(schema, table, 'pg');
+    let out = `CREATE TABLE ${name} PARTITION OF ${qualified(info.partitionOf.schema, info.partitionOf.table, 'pg')}\n  ${info.partitionOf.bound}${partkey ? `\n  PARTITION BY ${partkey}` : ''};\n`;
+    out += await this.ownExtras(db, schema, table);
+    out += `-- part of ${info.root.schema}.${info.root.table}; open it for the whole table's DDL\n`;
+    return out;
+  }
+
+  /** What a partition has of its own: constraints and indexes it did not get from its parent. */
+  async ownExtras(db, schema, table) {
+    const name = qualified(schema, table, 'pg');
+    let out = '';
+    const own = await this.q(db, `
+      select con.conname as name, pg_get_constraintdef(con.oid) as def from pg_constraint con join pg_class t on t.oid = con.conrelid join pg_namespace n on n.oid = t.relnamespace
+      where n.nspname = $1 and t.relname = $2 and con.coninhcount = 0 and con.conparentid = 0 and con.contype in ('p','u','c','f','x') order by con.conname`, [schema, table]);
+    for (const c of own.rows) out += `ALTER TABLE ${name} ADD CONSTRAINT ${quoteIdent(c.name, 'pg')} ${c.def};\n`;
+    const ix = await this.q(db, `
+      select pg_get_indexdef(ix.indexrelid) as def from pg_index ix join pg_class t on t.oid = ix.indrelid join pg_namespace n on n.oid = t.relnamespace
+      where n.nspname = $1 and t.relname = $2 and not exists (select 1 from pg_inherits i where i.inhrelid = ix.indexrelid)
+        and not exists (select 1 from pg_constraint c where c.conindid = ix.indexrelid and c.conrelid = t.oid) order by 1`, [schema, table]);
+    for (const r of ix.rows) out += r.def.replace(/ ON ONLY /, ' ON ') + ';\n';
     return out;
   }
 
@@ -268,7 +354,19 @@ class PgDriver {
       (p.Plans || []).forEach(walk);
     };
     walk(r.rows[0]['QUERY PLAN'][0].Plan);
-    return out;
+    // a scan of a partition is a read of the partitioned table it belongs to (scope is set on that table)
+    const rels = out.filter((t) => !t.fn);
+    if (rels.length) {
+      const roots = await this.q(db, `
+        select x.s, x.t, rn.nspname as root_schema, r.relname as root
+        from unnest($1::text[], $2::text[]) as x(s, t)
+        join pg_namespace n on n.nspname = x.s join pg_class c on c.relnamespace = n.oid and c.relname = x.t and c.relispartition
+        cross join lateral (select a.anc from ${ANCESTORS('c.oid')} a order by a.depth desc limit 1) ra
+        join pg_class r on r.oid = ra.anc join pg_namespace rn on rn.oid = r.relnamespace`, [rels.map((t) => t.schema), rels.map((t) => t.table)]);
+      for (const row of roots.rows) for (const t of rels) if (t.schema === row.s && t.table === row.t) { t.partition = t.table; t.schema = row.root_schema; t.table = row.root; }
+    }
+    const seen = new Set();
+    return out.filter((t) => { const k = `${t.schema}.${t.table}.${!!t.fn}`; if (seen.has(k)) return false; seen.add(k); return true; });
   }
 }
 

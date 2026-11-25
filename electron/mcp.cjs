@@ -137,7 +137,7 @@ class McpServer {
     const t = [
       { name: 'list_connections', title: 'List database connections', description: 'Database connections the user has shared with you, with their access level (read or write) and scope.', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } },
       { name: 'list_tables', title: 'List tables', description: 'Schemas and tables (or MongoDB databases and collections) you may use on a connection, with estimated row counts.', inputSchema: { type: 'object', properties: { connection: conn, ...where }, required: ['connection'] }, annotations: { readOnlyHint: true } },
-      { name: 'describe_table', title: 'Describe a table', description: 'Columns (type, nullability, default, primary key), indexes, foreign keys and the CREATE statement of one table or collection.', inputSchema: { type: 'object', properties: { connection: conn, schema: { type: 'string' }, table: { type: 'string' }, database: where.database }, required: ['connection', 'schema', 'table'] }, annotations: { readOnlyHint: true } },
+      { name: 'describe_table', title: 'Describe a table', description: 'Columns (type, nullability, default, primary key), indexes, foreign keys, partitioning (key and partitions with their bounds) and the CREATE statement of one table or collection.', inputSchema: { type: 'object', properties: { connection: conn, schema: { type: 'string' }, table: { type: 'string' }, database: where.database }, required: ['connection', 'schema', 'table'] }, annotations: { readOnlyHint: true } },
     ];
     if (sql) {
       t.push({ name: 'query', title: 'Run a read-only SQL query', description: 'Run one SELECT / WITH / SHOW / EXPLAIN statement and get rows back as JSON. Reads only; the connection\'s scope limits which tables you can touch.', inputSchema: { type: 'object', properties: { connection: conn, sql: { type: 'string' }, ...where, max_rows: { type: 'integer', minimum: 1, maximum: 5000, description: 'Default 200.' } }, required: ['connection', 'sql'] }, annotations: { readOnlyHint: true } });
@@ -195,14 +195,28 @@ class McpServer {
       for (const s of schemas) {
         if (!schemaVisible(policy, db, s, ci)) continue;
         const objs = (await driver.objects(db, s)).filter((o) => allowed(policy, db, s, o.name, ci));
-        if (objs.length) out[s] = objs.map((o) => ({ name: o.name, type: o.sub || o.kind, rows: o.rows ?? undefined, comment: o.comment || undefined }));
+        if (objs.length) out[s] = objs.map((o) => ({ name: o.name, type: o.sub || o.kind, rows: o.rows ?? undefined, partition_key: o.partitionKey, partitions: o.partitions, comment: o.comment || undefined }));
       }
       return { connection: c.name, type: c.type, database: db || undefined, schemas: out };
     }
     if (name === 'describe_table') {
-      if (!allowed(policy, db, a.schema, a.table, ci)) throw denied(`${a.schema}.${a.table} is outside this connection's scope.`);
+      // a partition is in scope when the partitioned table it belongs to is
+      const parts = driver.partitions ? await driver.partitions(db, a.schema, a.table).catch(() => null) : null;
+      const owner = parts?.root || { schema: a.schema, table: a.table };
+      if (!allowed(policy, db, owner.schema, owner.table, ci)) throw denied(`${a.schema}.${a.table} is outside this connection's scope.`);
       const [columns, indexes, fks, ddl] = await Promise.all([driver.columns(db, a.schema, a.table), driver.indexes(db, a.schema, a.table), driver.foreignKeys(db, a.schema, a.table), driver.ddl(db, a.schema, a.table).catch(() => '')]);
-      return { table: `${a.schema}.${a.table}`, columns: columns.map((x) => ({ name: x.name, type: x.type, nullable: x.nullable, default: x.default ?? undefined, primary_key: x.pk || undefined, comment: x.comment || undefined })), indexes: indexes.map((i) => ({ name: i.name, columns: i.columns, unique: i.unique })), foreign_keys: fks.filter((f) => allowed(policy, db, f.ref_schema, f.ref_table, ci)).map((f) => ({ name: f.name, definition: f.def })), ddl };
+      const out = { table: `${a.schema}.${a.table}`, columns: columns.map((x) => ({ name: x.name, type: x.type, nullable: x.nullable, default: x.default ?? undefined, primary_key: x.pk || undefined, comment: x.comment || undefined })), indexes: indexes.map((i) => ({ name: i.name, columns: i.columns, unique: i.unique })), foreign_keys: fks.filter((f) => allowed(policy, db, f.ref_schema, f.ref_table, ci)).map((f) => ({ name: f.name, definition: f.def })) };
+      if (parts?.key) {
+        out.partitioning = {
+          partition_by: parts.key,
+          partitions: parts.partitions.slice(0, 500).map((x) => ({ name: `${x.schema}.${x.name}`, bound: x.bound, rows: x.rows ?? undefined, ...(x.level > 1 ? { parent: x.parent } : {}), ...(x.key ? { partition_by: x.key } : {}) })),
+          note: `Filter on the partition key (${parts.key.replace(/^\w+\s*/, '')}) so PostgreSQL scans only the partitions that can match. Querying ${a.schema}.${a.table} reads all of its partitions.`,
+        };
+        if (parts.partitions.length > 500) out.partitioning.more = parts.partitions.length - 500;
+      }
+      if (parts?.partitionOf) out.partition_of = { table: `${parts.partitionOf.schema}.${parts.partitionOf.table}`, bound: parts.partitionOf.bound, top_level: `${parts.root.schema}.${parts.root.table}` };
+      out.ddl = ddl;
+      return out;
     }
     if (c.type === 'mongo') return this.mongo(name, a, c, policy, driver, maxRows);
 
@@ -298,6 +312,6 @@ function compactPlan(n) {
 }
 
 const INSTRUCTIONS = `Pelican is the user's desktop database client. It shares only the connections the user opened for AI access, each read-only or read-write, optionally limited to some schemas or tables.
-Start with list_connections, then list_tables and describe_table before writing SQL. Use query for reads (one statement per call; results are capped by max_rows) and explain to look at a plan. Writes (execute, mongo_write) exist only where the user allowed them and may need the user's approval. If a call is denied, tell the user what you needed rather than retrying around it.`;
+Start with list_connections, then list_tables and describe_table before writing SQL. Use query for reads (one statement per call; results are capped by max_rows) and explain to look at a plan. PostgreSQL partitioned tables: list_tables shows the parent with partition_key; describe_table lists its partitions and bounds. Query the parent and filter on the partition key so only the matching partitions are scanned; scope set on the parent covers its partitions. Writes (execute, mongo_write) exist only where the user allowed them and may need the user's approval. If a call is denied, tell the user what you needed rather than retrying around it.`;
 
 module.exports = { McpServer, allowed, scopeKey };

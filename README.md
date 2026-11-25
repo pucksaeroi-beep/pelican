@@ -63,8 +63,8 @@ DBeaver can do almost anything, but most days you use a handful of features thro
 Also included:
 
 - **Query Manager** (⌘J): every statement Pelican ran, whether from you, a table view or an AI client. It records time, duration, rows and result, and you can search it and filter it to errors. Double-click an entry to open it in an editor.
-- **Navigator**: connection → database → schema → tables / views → columns, with row estimates and a filter box.
-- **Table tabs**: the Data, Columns, Indexes & keys, and DDL views of any table or collection.
+- **Navigator**: connection → database → schema → tables / views → columns, with row estimates and a filter box. PostgreSQL partitioned tables show their **partitions** (sub-partitions included) under the table.
+- **Table tabs**: the Data, Columns, Indexes & keys, and DDL views of any table or collection. A partitioned table adds a **Partitions** tab (key, bounds, rows and size of each partition), and its DDL recreates the partitions too.
 - **Export** the rows you loaded to CSV, JSON, Markdown or SQL `INSERT`s.
 - **Editor tabs come back** after a restart.
 - **Light and dark** themes follow macOS. The sidebar uses macOS vibrancy.
@@ -126,7 +126,7 @@ Pelican runs an [MCP](https://modelcontextprotocol.io) server on `127.0.0.1`, so
 | **Off** (default) | Hidden from AI clients. |
 | **Read only** | PostgreSQL and MySQL run every query inside a `READ ONLY` transaction, and SQLite uses a read-only handle, so the database itself refuses writes. A statement check also runs first. MongoDB allows only find, aggregate (without `$out` / `$merge`), count and distinct. |
 | **Read & write** | Adds an `execute` tool (and `mongo_write`). With **Ask me before every change** on, Pelican shows the statement in a dialog and waits for Allow / Deny. |
-| **Scope** | Everything, or only the schemas and tables you tick. Pelican asks **the database's own planner** which tables a statement reads (`EXPLAIN` on PostgreSQL / MySQL / Db2, the bytecode on SQLite). That includes tables behind views and subqueries. |
+| **Scope** | Everything, or only the schemas and tables you tick. Pelican asks **the database's own planner** which tables a statement reads (`EXPLAIN` on PostgreSQL / MySQL / Db2, the bytecode on SQLite). That includes tables behind views and subqueries. A PostgreSQL partition counts as its partitioned table, so sharing the table shares its partitions, and `describe_table` tells the AI the partition key and bounds. |
 | **Rows per query** | A cap on how many rows the AI client gets back. |
 
 Connect Claude Code with one command. The MCP window has a **Copy** button that fills in your token:
@@ -265,10 +265,11 @@ test/                 node --test suites
 - **Query Manager (⌘J):** ประวัติทุก query ที่รัน ค้นหาได้ และกรองเฉพาะที่ error ได้
 - **Execution plan (⌘E / ⇧⌘E):** แสดงเป็นแผนผังพร้อมแถบเวลา จำนวนแถวที่คาดไว้เทียบกับที่ได้จริง และเตือนเมื่อเจอ full scan
 - **SQL editor:** เติมชื่อตารางและคอลัมน์ให้อัตโนมัติ รันทีละคำสั่ง (⌘↵) หรือทั้งสคริปต์ (⇧⌘↵) ได้
+- **Partition (PostgreSQL):** ตารางที่แบ่ง partition จะแสดง partition ทั้งหมด (รวม sub-partition) ไว้ใต้ตารางในแถบซ้าย และมีแท็บ Partitions บอก key, ช่วงค่า, จำนวนแถว และขนาดของแต่ละ partition DDL ที่สร้างก็มีคำสั่งสร้าง partition ครบ
 - **Cache เปิดไว้เป็นค่าเริ่มต้น:** เปิดตารางเดิมหรือรัน query เดิมซ้ำจะไม่ไปดึงจากฐานข้อมูลใหม่ กด ⌘R หรือปุ่ม ↻ เมื่อต้องการข้อมูลล่าสุด ถ้าปิด cache แอปจะดึงใหม่ทุกครั้ง
 - **AI (MCP):**
   - ให้ Claude Code หรือ AI ตัวอื่นใช้ฐานข้อมูลได้ โดยกำหนดสิทธิ์แยกแต่ละ connection เป็นปิด, อ่านอย่างเดียว หรืออ่านและเขียน
-  - จำกัดให้เห็นเฉพาะบาง schema หรือบางตารางได้
+  - จำกัดให้เห็นเฉพาะบาง schema หรือบางตารางได้ ถ้าแชร์ตารางที่แบ่ง partition (PostgreSQL) ก็จะรวมทุก partition ของตารางนั้นด้วย และ AI จะรู้ partition key กับช่วงค่าของแต่ละ partition
   - ตั้งให้ถามก่อนทุกครั้งที่ AI จะแก้ข้อมูลได้
 - **เชื่อมต่อง่าย:** แอปหา database ที่รันอยู่ในเครื่องให้เอง หรือวาง URL อย่าง `postgres://…` ได้เลย รหัสผ่านเก็บเป็นข้อความธรรมดาเพราะใช้ในเครื่อง
 

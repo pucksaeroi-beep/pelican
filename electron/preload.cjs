@@ -11,7 +11,7 @@ const on = (ch) => (fn) => { const h = (_e, ...a) => fn(...a); ipcRenderer.on(ch
 const CHANNELS = [
   'app:state', 'settings:set', 'layout:set',
   'conn:save', 'conn:remove', 'conn:test', 'conn:connect', 'conn:disconnect', 'conn:detect', 'conn:parseUrl', 'conn:pickFile',
-  'meta:databases', 'meta:schemas', 'meta:objects', 'meta:columns', 'meta:table', 'meta:info',
+  'meta:databases', 'meta:schemas', 'meta:objects', 'meta:columns', 'meta:table', 'meta:partitions', 'meta:info',
   'data:table', 'data:count', 'data:distinct', 'data:query', 'data:explain', 'data:previewEdits', 'data:applyEdits', 'data:cancel', 'data:endSession', 'cache:clear', 'cache:stats',
   'history:list', 'history:clear', 'scripts:save', 'scripts:tabs', 'scripts:delete',
   'dump:tools', 'dump:pickOut', 'dump:run', 'dump:cancel', 'transfer:run', 'transfer:cancel',

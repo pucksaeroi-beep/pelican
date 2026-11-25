@@ -217,7 +217,8 @@ export class Sidebar {
     const sub = o.rows != null ? fmtNum(o.rows) : '';
     const scope = app.state.mcp.policies?.[c.id];
     g.append(this.row({ key, depth, label: o.name, sub, iconEl: icon(ic, 'tn-ic2 ' + ic), expandable: true, cls: 'tn-obj',
-      title: `${schema}.${o.name}${o.sub ? ' · ' + o.sub : ''}${o.rows != null ? '\n≈ ' + fmtNum(o.rows) + ' rows' : ''}${o.size ? '\n' + fmtBytes(o.size) : ''}${o.comment ? '\n' + o.comment : ''}`,
+      title: `${schema}.${o.name}${o.sub ? ' · ' + o.sub : ''}${o.partitionKey ? `\nPARTITION BY ${o.partitionKey} · ${o.partitions} partitions` : ''}${o.rows != null ? '\n≈ ' + fmtNum(o.rows) + ' rows' : ''}${o.size ? '\n' + fmtBytes(o.size) : ''}${o.comment ? '\n' + o.comment : ''}`,
+      extra: o.partitionKey ? h('span', { class: 'tn-part', title: `Partitioned: ${o.partitionKey}` }, icon('layers')) : null,
       onOpen: () => app.emit('open-table', addr),
       menu: () => [
         { label: 'Open data', icon: 'table', onClick: () => app.emit('open-table', addr) },
@@ -236,8 +237,34 @@ export class Sidebar {
         for (const col of cols) el.append(h('div', { class: 'tn tn-col', style: { '--d': depth + 1 }, title: `${col.name} ${col.type}${col.nullable ? '' : ' NOT NULL'}${col.default != null ? ' DEFAULT ' + col.default : ''}${col.comment ? '\n' + col.comment : ''}` },
           h('span', { class: 'tn-tw' }), icon(col.pk ? 'key' : 'column', 'tn-ic2 ' + (col.pk ? 'pk' : 'col')), h('span', { class: 'tn-label' }, col.name), h('span', { class: 'tn-sub' }, col.type)));
       }));
+      if (o.partitionKey) g.append(this.partitionsOf(c, db, schema, o, depth + 1));
     }
     return g;
+  }
+  /** A partitioned table's partitions (sub-partitions indented under theirs); each opens like a table. */
+  partitionsOf(c, db, schema, o, depth) {
+    const key = `${c.id}/db/${db}/s/${schema}/o/${o.name}/parts`;
+    const box = h('div', {});
+    box.append(this.row({ key, depth, label: 'Partitions', sub: String(o.partitions ?? ''), iconEl: icon('folder', 'tn-ic2 folder'), expandable: true, cls: 'tn-folder', title: `PARTITION BY ${o.partitionKey}` }));
+    if (!open.has(key)) return box;
+    box.append(this.lazy(key + '/list', depth + 1, () => api.meta.partitions(c.id, db, schema, o.name), (info, el) => {
+      for (const p of info?.partitions || []) {
+        const addr = { connId: c.id, db, schema: p.schema, table: p.name, kind: 'table' };
+        el.append(this.row({ key: `${key}/${p.schema}.${p.name}`, depth: depth + p.level, label: p.name, sub: p.rows != null ? fmtNum(p.rows) : '',
+          iconEl: icon(p.partitioned ? 'layers' : 'table', 'tn-ic2 table'), cls: 'tn-obj tn-partition',
+          title: `${p.schema}.${p.name}\n${p.bound}${p.key ? '\nPARTITION BY ' + p.key : ''}${p.rows != null ? '\n≈ ' + fmtNum(p.rows) + ' rows' : ''}${p.size ? '\n' + fmtBytes(p.size) : ''}`,
+          onOpen: () => app.emit('open-table', addr),
+          menu: () => [
+            { label: 'Open data', icon: 'table', onClick: () => app.emit('open-table', addr) },
+            { label: 'Show DDL', icon: 'file', onClick: () => app.emit('open-table', { ...addr, tab: 'ddl' }) },
+            { label: 'SELECT in editor', icon: 'code', onClick: () => app.emit('open-editor', { connId: c.id, db, schema, text: `SELECT * FROM ${app.qualified(c, p.schema, p.name)} LIMIT 100;`, run: true }) },
+            '-',
+            { label: 'Copy name', icon: 'copy', onClick: () => api.clipboard.write(p.name) },
+            { label: 'Copy bound', onClick: () => api.clipboard.write(p.bound) },
+          ] }));
+      }
+    }));
+    return box;
   }
 }
 

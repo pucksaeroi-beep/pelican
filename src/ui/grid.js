@@ -35,6 +35,7 @@ export function display(v) {
 export class Grid {
   constructor({ mode = 'local', onQuery, loadDistinct, onOpenRow, tableName, dialect, emptyText = 'No rows', edit } = {}) {
     this.edit = edit;
+    this.onOpenRow = onOpenRow;
     this.changes = new Map(); // row index → Map(column index → new value)
     this.deleted = new Set(); // row indexes marked for deletion
     this.added = new Set(); // row indexes of rows added in the grid
@@ -69,6 +70,7 @@ export class Grid {
       const p = this.cellAt(e);
       if (!p) return;
       if (p.c < 0) { this.toggleRecord(true); return; }
+      if (this.onOpenRow) { this.onOpenRow(this.rows[this.view[p.r]]); return; }
       this.sel = { r: p.r, c: p.c, r2: p.r, c2: p.c };
       if (this.edit) this.startEdit(p.r, p.c); else this.toggleRecord(true);
     });
