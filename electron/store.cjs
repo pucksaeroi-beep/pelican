@@ -8,7 +8,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DEFAULT_SETTINGS = { cache: true, cacheTtlMin: 30, editorMaxRows: 1000, pageSize: 200, showSystem: false, theme: 'system', fontSize: 13, confirmDangerous: true };
+const { DEFAULT_NO_PROXY } = require('./proxy.cjs');
+
+// proxy: the app-wide route for database connections; each connection can override it (proxyMode / proxyUrl).
+const DEFAULT_SETTINGS = { cache: true, cacheTtlMin: 30, editorMaxRows: 1000, pageSize: 200, showSystem: false, theme: 'system', fontSize: 13, confirmDangerous: true, proxy: { mode: 'none', url: '', noProxy: DEFAULT_NO_PROXY, user: '', pass: '' } };
 
 class Store {
   constructor(dir) {

@@ -1,8 +1,8 @@
 {
   "name": "pelican",
   "productName": "Pelican",
-  "version": "1.1.1",
-  "description": "A fast, modern database client for macOS \u2014 PostgreSQL, MySQL, SQLite, MongoDB and DB2, with dumps and a permissioned MCP server",
+  "version": "1.2.0",
+  "description": "A fast, modern database client for macOS — PostgreSQL, MySQL, SQLite, MongoDB and DB2, with dumps and a permissioned MCP server",
   "main": "electron/main.cjs",
   "type": "module",
   "private": true,
@@ -71,6 +71,7 @@
     "mongodb": "^7.9.1",
     "mysql2": "^3.24.6",
     "pg": "^8.23.1",
-    "pg-cursor": "^2.22.1"
+    "pg-cursor": "^2.22.1",
+    "socks": "^2.8.11"
   }
 }

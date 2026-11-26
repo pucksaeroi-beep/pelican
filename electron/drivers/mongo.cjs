@@ -20,10 +20,13 @@ class MongoDriver {
     if (c.uri) return c.uri;
     const auth = c.user ? `${encodeURIComponent(c.user)}:${encodeURIComponent(c.password || '')}@` : '';
     const q = c.user ? `?authSource=${encodeURIComponent(c.authSource || 'admin')}` : '';
-    return `mongodb://${auth}${c.host || '127.0.0.1'}:${+c.port || 27017}/${q}`;
+    const host = c.tunnel ? `${c.tunnel.host}:${c.tunnel.port}` : `${c.host || '127.0.0.1'}:${+c.port || 27017}`;
+    return `mongodb://${auth}${host}/${q}`;
   }
   async connect() {
-    this.client = new MongoClient(this.uri(), { serverSelectionTimeoutMS: 8000, appName: 'Pelican', directConnection: !this.cfg.uri });
+    const px = this.cfg.mongoProxy; // SOCKS5 for connection strings (the driver dials every replica-set member itself)
+    const proxy = px ? { proxyHost: px.host, proxyPort: px.port, ...(px.user ? { proxyUsername: px.user, proxyPassword: px.pass } : {}) } : {};
+    this.client = new MongoClient(this.uri(), { serverSelectionTimeoutMS: 8000, appName: 'Pelican', directConnection: !this.cfg.uri, ...proxy });
     await this.client.connect();
     const info = await this.client.db('admin').command({ buildInfo: 1 });
     this.version = 'MongoDB ' + info.version;

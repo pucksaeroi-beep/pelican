@@ -22,6 +22,8 @@ class MysqlDriver {
         database: c.database || undefined, connectionLimit: 5, dateStrings: true, supportBigNumbers: true, bigNumberStrings: true,
         multipleStatements: false, connectTimeout: 8000, charset: 'utf8mb4', decimalNumbers: false,
         ssl: c.ssl && c.ssl !== 'disable' ? { rejectUnauthorized: c.ssl === 'verify' } : undefined,
+        // Through a proxy: keep the real host (for TLS) and dial the local tunnel instead.
+        ...(c.tunnel ? { stream: () => require('net').connect(c.tunnel.port, c.tunnel.host) } : {}),
       });
       this._pool.pool.on('error', () => {});
     }

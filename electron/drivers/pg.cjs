@@ -32,9 +32,10 @@ class PgDriver {
     if (!p) {
       const c = this.cfg;
       p = new pg.Pool({
-        host: c.host || '127.0.0.1', port: +c.port || 5432, user: c.user || undefined, password: c.password || undefined,
+        host: c.tunnel?.host || c.host || '127.0.0.1', port: c.tunnel?.port || +c.port || 5432, user: c.user || undefined, password: c.password || undefined,
         database: db, max: 5, idleTimeoutMillis: 60000, connectionTimeoutMillis: 8000, application_name: 'Pelican',
-        ssl: c.ssl && c.ssl !== 'disable' ? { rejectUnauthorized: c.ssl === 'verify' } : undefined,
+        // Through a proxy tunnel the socket goes to 127.0.0.1, so TLS is told the real server name.
+        ssl: c.ssl && c.ssl !== 'disable' ? { rejectUnauthorized: c.ssl === 'verify', ...(c.tunnel ? { servername: c.host } : {}) } : undefined,
       });
       p.on('error', () => {}); // idle client died; the next query reconnects
       this.pools.set(db, p);

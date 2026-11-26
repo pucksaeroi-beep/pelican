@@ -18,7 +18,7 @@ PostgreSQL · MySQL / MariaDB · SQLite · MongoDB · IBM Db2
 
 <sub>No build needed · free · <a href="#%EF%B8%8F-download">first-launch steps</a> · <a href="https://github.com/pucksaeroi-beep/pelican/releases">all releases</a></sub>
 
-[Download](#%EF%B8%8F-download) · [Features](#-features) · [Dumps](#-dumps) · [Transfer](#-transfer) · [AI access (MCP)](#-ai-access-mcp) · [Shortcuts](#%EF%B8%8F-keyboard-shortcuts) · [Install from source](#-install-from-source) · [ภาษาไทย](#-ภาษาไทย)
+[Download](#%EF%B8%8F-download) · [Features](#-features) · [Dumps](#-dumps) · [Transfer](#-transfer) · [AI access (MCP)](#-ai-access-mcp) · [Proxy](#-proxy--no-proxy) · [Shortcuts](#%EF%B8%8F-keyboard-shortcuts) · [Install from source](#-install-from-source) · [ภาษาไทย](#-ภาษาไทย)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.png" />
@@ -198,14 +198,30 @@ node scripts/seed-demo.cjs mysql mysql://root:secret@localhost:3306/            
 node scripts/seed-demo.cjs mongo mongodb://localhost:27017/                       # creates database "shop"
 ```
 
+## 🌐 Proxy / no proxy
+
+**Settings → Network** sets the route for every database connection:
+
+| Mode | What happens |
+|---|---|
+| **No proxy** (default) | Connections go straight to the server. |
+| **Match macOS** | Follows System Settings → Network → Proxies, including PAC files. Hosts macOS sends direct stay direct. |
+| **Custom proxy** | `http://host:port` (HTTP CONNECT), `https://host:port` or `socks5://host:port`, with an optional user name and password. |
+
+**No proxy for** takes a comma-separated list: `localhost`, `*.corp.example` or `.corp.example`, IPs, ranges like `10.0.0.0/8`, and `host:port`.
+
+Each connection can override it under **Proxy**: *App setting*, *No proxy*, or its own *Custom proxy*. **Test connection** shows the proxy it went through.
+
+How it works: drivers only know host and port, so Pelican opens a local tunnel on `127.0.0.1` that forwards through the proxy. TLS still checks the real server name. PostgreSQL, MySQL/MariaDB, Db2, MongoDB (host + port) and dumps with `pg_dump` / `mysqldump` all use it. A MongoDB connection string (`mongodb+srv://` or several hosts) needs a SOCKS5 proxy, which the MongoDB driver uses itself. SQLite files never use a proxy.
+
 ## 💾 Where data lives
 
 Everything is in `~/Library/Application Support/Pelican/`:
 
 | File | Contents |
 |---|---|
-| `connections.json` | Your connections, passwords included (plain text, mode 600) |
-| `config.json` | Settings, MCP settings, per-connection AI access, window layout |
+| `connections.json` | Your connections, passwords and per-connection proxy included (plain text, mode 600) |
+| `config.json` | Settings (including the app proxy), MCP settings, per-connection AI access, window layout |
 | `history.jsonl` | The Query Manager log (last 5,000 entries) |
 | `scripts/` | Open SQL editor tabs |
 
@@ -220,6 +236,8 @@ electron/
   dump.cjs            native tools + built-in streaming dumper
   transfer.cjs        copy tables between connections, with type mapping
   mcp.cjs             MCP server (Streamable HTTP) and permission checks
+  proxy.cjs           proxy URLs, no-proxy rules, HTTP CONNECT / SOCKS5 dialing, local tunnels (no dependencies)
+  netroute.cjs        picks direct or proxied for each connection and opens its tunnel
   drivers/            pg · mysql · sqlite (worker thread) · mongo · db2, one interface
   lib/sqltext.cjs     statement splitting, read-only checks, quoting
 src/
@@ -271,6 +289,7 @@ test/                 node --test suites
   - ให้ Claude Code หรือ AI ตัวอื่นใช้ฐานข้อมูลได้ โดยกำหนดสิทธิ์แยกแต่ละ connection เป็นปิด, อ่านอย่างเดียว หรืออ่านและเขียน
   - จำกัดให้เห็นเฉพาะบาง schema หรือบางตารางได้ ถ้าแชร์ตารางที่แบ่ง partition (PostgreSQL) ก็จะรวมทุก partition ของตารางนั้นด้วย และ AI จะรู้ partition key กับช่วงค่าของแต่ละ partition
   - ตั้งให้ถามก่อนทุกครั้งที่ AI จะแก้ข้อมูลได้
+- **Proxy / No proxy:** ตั้งค่าได้ที่ Settings → Network เลือกได้ว่าจะไม่ใช้ proxy (ค่าเริ่มต้น), ใช้ตาม macOS หรือกำหนดเอง (http, https, socks5 พร้อม user/password) และใส่รายการ host ที่ไม่ต้องผ่าน proxy ได้ เช่น `localhost, *.corp.example, 10.0.0.0/8` แต่ละ connection เลือกเองได้อีกชั้นว่าจะใช้ค่าของแอป, ไม่ใช้ proxy หรือใช้ proxy ของตัวเอง ปุ่ม Test connection จะบอกว่าผ่าน proxy ตัวไหน ใช้ได้กับ PostgreSQL, MySQL, Db2, MongoDB และการ dump ด้วย
 - **เชื่อมต่อง่าย:** แอปหา database ที่รันอยู่ในเครื่องให้เอง หรือวาง URL อย่าง `postgres://…` ได้เลย รหัสผ่านเก็บเป็นข้อความธรรมดาเพราะใช้ในเครื่อง
 
 **ติดตั้งจากซอร์สโค้ด**

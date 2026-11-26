@@ -102,9 +102,9 @@ function runNative(cfg, file, opts, progress, signal) {
   const tool = path.basename(file);
   let out = opts.out;
   if (tool === 'pg_dump') {
-    args.push('-h', cfg.host || '127.0.0.1', '-p', String(cfg.port || 5432), '-U', cfg.user || 'postgres', '-d', opts.db || cfg.database || 'postgres', '--no-password', '-v');
+    args.push('-h', cfg.tunnel?.host || cfg.host || '127.0.0.1', '-p', String(cfg.tunnel?.port || cfg.port || 5432), '-U', cfg.user || 'postgres', '-d', opts.db || cfg.database || 'postgres', '--no-password', '-v');
     if (cfg.password) env.PGPASSWORD = cfg.password;
-    if (cfg.ssl && cfg.ssl !== 'disable') env.PGSSLMODE = cfg.ssl === 'verify' ? 'verify-full' : 'require';
+    if (cfg.ssl && cfg.ssl !== 'disable') env.PGSSLMODE = cfg.ssl === 'verify' ? (cfg.tunnel ? 'verify-ca' : 'verify-full') : 'require'; // tunnel: host name is 127.0.0.1
     if (opts.content === 'schema') args.push('--schema-only');
     if (opts.content === 'data') args.push('--data-only');
     if (opts.scope === 'schemas') for (const s of opts.schemas) args.push('-n', pgPattern(s));
@@ -115,7 +115,7 @@ function runNative(cfg, file, opts, progress, signal) {
     args.push('-F', opts.pgFormat === 'custom' ? 'c' : 'p', '-f', out);
     if (opts.gzip && opts.pgFormat !== 'custom') args.splice(args.indexOf('-f'), 0, '-Z', '6');
   } else if (tool === 'mysqldump' || tool === 'mariadb-dump') {
-    args.push(`--host=${cfg.host || '127.0.0.1'}`, `--port=${cfg.port || 3306}`, `--user=${cfg.user || 'root'}`, '--protocol=TCP', '--single-transaction',
+    args.push(`--host=${cfg.tunnel?.host || cfg.host || '127.0.0.1'}`, `--port=${cfg.tunnel?.port || cfg.port || 3306}`, `--user=${cfg.user || 'root'}`, '--protocol=TCP', '--single-transaction',
       '--default-character-set=utf8mb4', '--hex-blob', '--verbose', `--result-file=${out}`);
     if (cfg.password) env.MYSQL_PWD = cfg.password;
     if (opts.content === 'schema') args.push('--no-data');

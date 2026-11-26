@@ -77,8 +77,22 @@ export function connectionDialog(existing) {
         if (c.type === 'postgres') form.append(check('showAllDatabases', 'Show all databases on this server'));
       }
     }
+    if (c.type !== 'sqlite') form.append(proxyRow());
     const colors = h('div', { class: 'colors' }, COLORS.map((col) => h('button', { class: 'color' + ((c.color || '') === col ? ' on' : '') + (col ? '' : ' none'), style: { background: col || 'transparent' }, title: col ? 'Colour tag (handy for production)' : 'No colour', onclick: (e) => { c.color = col; colors.querySelectorAll('.color').forEach((x) => x.classList.toggle('on', x === e.currentTarget)); } })));
     form.append(row(field('Name', nameIn), field('Colour', colors)));
+  }
+
+  /** Network: the app's proxy setting, no proxy, or this connection's own proxy. */
+  function proxyRow() {
+    const app_ = app.state.settings.proxy || { mode: 'none' };
+    const appLabel = app_.mode === 'custom' ? `App setting (${String(app_.url || '').replace(/^[a-z0-9]+:\/\//i, '').replace(/^[^@/]*@/, '')})` : app_.mode === 'system' ? 'App setting (match macOS)' : 'App setting (no proxy)';
+    const sel = h('select', { class: 'input' }, [['', appLabel], ['none', 'No proxy'], ['custom', 'Custom proxy…']].map(([v, l]) => h('option', { value: v, selected: (c.proxyMode || '') === v }, l)));
+    const url = text('proxyUrl', 'socks5://127.0.0.1:1080  or  http://proxy:8080', { mono: true });
+    const urlField = field('Proxy address', url);
+    const sync = () => { urlField.style.display = c.proxyMode === 'custom' ? '' : 'none'; };
+    sel.addEventListener('change', () => { c.proxyMode = sel.value || undefined; sync(); });
+    sync();
+    return h('div', { class: 'frow' }, field('Proxy', sel), urlField);
   }
 
   async function detect() {
@@ -100,7 +114,7 @@ export function connectionDialog(existing) {
     try {
       const r = await api.conn.test({ ...c });
       status.className = 'test-status ok';
-      clear(status).append(icon('check'), `Connected · ${r.version} · ${r.ms} ms`);
+      clear(status).append(icon('check'), `Connected · ${r.version} · ${r.ms} ms${r.via ? ' · via ' + r.via : ''}`);
       return true;
     } catch (e) {
       status.className = 'test-status err';

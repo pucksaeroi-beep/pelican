@@ -1,10 +1,12 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, protocol, net, dialog, shell, Menu, nativeTheme, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, protocol, net, session, dialog, shell, Menu, nativeTheme, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { Store, ResultCache } = require('./store.cjs');
 const { TYPES, makeDriver, detectLocal, parseUrl } = require('./drivers/index.cjs');
+const { routeConnection } = require('./netroute.cjs');
+const { normalize: normalizeProxy, parseProxy } = require('./proxy.cjs');
 const { buildSelect, buildCount, buildDistinct, buildDistinctWrapped, wrapQuery, buildEdits, editsText } = require('./drivers/sqlbuild.cjs');
 const { runTransfer } = require('./transfer.cjs');
 const { statementKind, codeWords } = require('./lib/sqltext.cjs');
@@ -37,30 +39,37 @@ async function open(id) {
   if (l?.driver && l.ready) return l;
   if (l?.opening) return l.opening;
   const cfg = cfgOf(id);
-  l = { cfg, driver: makeDriver(cfg) };
+  l = { cfg, driver: null, route: null };
   live.set(id, l);
   l.opening = (async () => {
     try {
-      const info = await l.driver.connect();
+      l.route = await routeTo(cfg);
+      l.driver = makeDriver(l.route.cfg);
+      const info = await l.driver.connect().catch((e) => { throw l.route.error(e); });
       l.version = info.version;
       l.ready = true;
-      notify('conn:state', { id, state: 'connected', version: l.version });
+      notify('conn:state', { id, state: 'connected', version: l.version, via: l.route.via });
       return l;
     } catch (e) {
       live.delete(id);
-      await l.driver.close().catch(() => {});
+      await l.driver?.close().catch(() => {});
+      await l.route?.close();
       notify('conn:state', { id, state: 'error', error: e.message });
       throw e;
     } finally { l.opening = null; }
   })();
   return l.opening;
 }
+/** Direct, or through the connection's / the app's proxy (see netroute.cjs). */
+function routeTo(cfg) {
+  return routeConnection(cfg, store.config.settings.proxy, (u) => session.defaultSession.resolveProxy(u), TYPES[cfg.type]?.port);
+}
 async function closeConn(id) {
   const l = live.get(id);
   live.delete(id);
   for (const k of [...meta.keys()]) if (k.startsWith(id + '\u0000')) meta.delete(k);
   cache.invalidate(id);
-  if (l) await l.driver.close().catch(() => {});
+  if (l) { await l.driver?.close().catch(() => {}); await l.route?.close(); }
   notify('conn:state', { id, state: 'closed' });
 }
 function notify(ch, payload) { if (win && !win.isDestroyed()) win.webContents.send(ch, payload); }
@@ -207,6 +216,11 @@ function registerIpc() {
     scripts: store.loadScripts(), activity, home: app.getPath('home'), downloads: store.config.lastDumpDir || app.getPath('downloads'),
   }));
   handle('settings:set', (patch) => {
+    if ('proxy' in patch) {
+      const proxy = normalizeProxy(patch.proxy);
+      if (proxy.mode === 'custom') parseProxy(proxy.url); // readable error for a bad address
+      patch = { ...patch, proxy };
+    }
     Object.assign(store.config.settings, patch);
     if ('cache' in patch && !patch.cache) cache.invalidate();
     if (patch.theme) nativeTheme.themeSource = patch.theme;
@@ -216,15 +230,21 @@ function registerIpc() {
   handle('layout:set', (patch) => { store.config.layout = { ...(store.config.layout || {}), ...patch }; store.saveConfig(); });
 
   handle('conn:save', async (c) => {
+    if (c.proxyMode === 'custom') parseProxy(c.proxyUrl);
+    if (!['none', 'custom'].includes(c.proxyMode)) { delete c.proxyMode; delete c.proxyUrl; }
     const saved = store.upsertConnection(c);
     if (live.has(saved.id)) await closeConn(saved.id);
     return saved;
   });
   handle('conn:remove', async (id) => { await closeConn(id); store.removeConnection(id); });
   handle('conn:test', async (cfg) => {
-    const d = makeDriver(cfg);
     const t0 = performance.now();
-    try { const info = await d.connect(); return { version: info.version, ms: Math.round(performance.now() - t0) }; } finally { await d.close().catch(() => {}); }
+    const route = await routeTo(cfg);
+    const d = makeDriver(route.cfg);
+    try {
+      const info = await d.connect().catch((e) => { throw route.error(e); });
+      return { version: info.version, ms: Math.round(performance.now() - t0), via: route.via };
+    } finally { await d.close().catch(() => {}); await route.close(); }
   });
   handle('conn:connect', async (id) => { const l = await open(id); return { version: l.version }; });
   handle('conn:disconnect', (id) => closeConn(id));
@@ -246,7 +266,7 @@ function registerIpc() {
     return { columns, indexes, fks, ddl, partitions };
   }));
   handle('meta:partitions', (id, db, schema, table, refresh) => cachedMeta(id, ['partitions', db, schema, table], refresh, (d) => (d.partitions ? d.partitions(db, schema, table) : null)));
-  handle('meta:info', (id) => { const l = live.get(id); return l ? { version: l.version, dialect: l.driver.dialect } : null; });
+  handle('meta:info', (id) => { const l = live.get(id); return l?.driver ? { version: l.version, dialect: l.driver.dialect, via: l.route?.via || null } : null; });
 
   handle('data:table', (o) => tableData(o));
   handle('data:count', async (o) => {
@@ -292,7 +312,7 @@ function registerIpc() {
     for (const k of [...meta.keys()]) if (k.startsWith(o.connId + '\u0000objects')) meta.delete(k); // row counts
     return { saved: o.changes.length };
   });
-  handle('data:cancel', async (connId, runId) => { const l = live.get(connId); if (l) await l.driver.cancel?.(runId); });
+  handle('data:cancel', async (connId, runId) => { const l = live.get(connId); if (l?.driver) await l.driver.cancel?.(runId); });
   handle('data:endSession', (connId, session) => { live.get(connId)?.driver.endSession?.(session); });
   handle('cache:clear', (connId) => { cache.invalidate(connId); return cache.stats(); });
   handle('cache:stats', () => cache.stats());
@@ -318,7 +338,7 @@ function registerIpc() {
     const l = await open(o.connId);
     dumpAbort = new AbortController();
     try {
-      return await runDump({ cfg: l.cfg, driver: l.driver }, o, (evt) => notify('dump:progress', evt), dumpAbort.signal);
+      return await runDump({ cfg: l.route?.cfg || l.cfg, driver: l.driver }, o, (evt) => notify('dump:progress', evt), dumpAbort.signal);
     } finally { dumpAbort = null; }
   });
   handle('dump:cancel', () => dumpAbort?.abort());
@@ -466,4 +486,4 @@ app.whenReady().then(async () => {
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
 });
 app.on('window-all-closed', () => app.quit());
-app.on('will-quit', () => { mcp?.stop(); for (const l of live.values()) l.driver.close().catch(() => {}); });
+app.on('will-quit', () => { mcp?.stop(); for (const l of live.values()) { l.driver?.close().catch(() => {}); l.route?.close(); } });

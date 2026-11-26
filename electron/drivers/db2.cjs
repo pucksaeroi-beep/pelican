@@ -17,7 +17,7 @@ class Db2Driver {
   connStr() {
     const c = this.cfg;
     const esc = (v) => (/[;{}]/.test(String(v)) ? `{${String(v).replace(/}/g, '}}')}}` : String(v));
-    return `DATABASE=${esc(c.database || 'SAMPLE')};HOSTNAME=${esc(c.host || '127.0.0.1')};PORT=${+c.port || 50000};PROTOCOL=TCPIP;UID=${esc(c.user || 'db2inst1')};PWD=${esc(c.password || '')};ConnectTimeout=10;${c.ssl && c.ssl !== 'disable' ? 'Security=SSL;' : ''}`;
+    return `DATABASE=${esc(c.database || 'SAMPLE')};HOSTNAME=${esc(c.tunnel?.host || c.host || '127.0.0.1')};PORT=${c.tunnel?.port || +c.port || 50000};PROTOCOL=TCPIP;UID=${esc(c.user || 'db2inst1')};PWD=${esc(c.password || '')};ConnectTimeout=10;${c.ssl && c.ssl !== 'disable' ? 'Security=SSL;' : ''}`;
   }
   async connect() {
     this.conn = await load().open(this.connStr());
